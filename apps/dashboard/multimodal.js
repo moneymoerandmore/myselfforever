@@ -1,0 +1,866 @@
+const poeApiKeyInput = document.querySelector("#poeApiKey");
+const poeModelInput = document.querySelector("#poeModel");
+const clearPoeApiKeyButton = document.querySelector("#clearPoeApiKey");
+const mediaFileInput = document.querySelector("#mediaFile");
+const transcriptFileInput = document.querySelector("#transcriptFile");
+const localAsrPathInput = document.querySelector("#localAsrPath");
+const localAsrModelInput = document.querySelector("#localAsrModel");
+const localAsrComputeInput = document.querySelector("#localAsrCompute");
+const localAsrLanguageInput = document.querySelector("#localAsrLanguage");
+const targetInput = document.querySelector("#target");
+const frameLimitInput = document.querySelector("#frameLimit");
+const frameMaxEdgeInput = document.querySelector("#frameMaxEdge");
+const jpegQualityInput = document.querySelector("#jpegQuality");
+const noteInput = document.querySelector("#note");
+const contextInput = document.querySelector("#context");
+const timelineTextInput = document.querySelector("#timelineText");
+const clearButton = document.querySelector("#clearButton");
+const extractButton = document.querySelector("#extractButton");
+const analyzeButton = document.querySelector("#analyzeButton");
+const localAsrButton = document.querySelector("#localAsrButton");
+const sourceMeta = document.querySelector("#sourceMeta");
+const transcriptMeta = document.querySelector("#transcriptMeta");
+const statusBadge = document.querySelector("#statusBadge");
+const videoProbe = document.querySelector("#videoProbe");
+const frameCanvas = document.querySelector("#frameCanvas");
+const frameStrip = document.querySelector("#frameStrip");
+const frameMeta = document.querySelector("#frameMeta");
+const resultMeta = document.querySelector("#resultMeta");
+const resultText = document.querySelector("#resultText");
+const confirmationPanel = document.querySelector("#confirmationPanel");
+const confirmationList = document.querySelector("#confirmationList");
+const confirmSelectedButton = document.querySelector("#confirmSelectedButton");
+
+const POE_API_KEY_STORAGE_KEY = "digitalTwin.poeApiKey";
+const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
+const LOCAL_ASR_PATH_STORAGE_KEY = "digitalTwin.localAsrPath";
+const LOCAL_ASR_MODEL_STORAGE_KEY = "digitalTwin.localAsrModel";
+const MULTIMODAL_DEFAULT_MODEL = "GPT-4o";
+const LEGACY_MULTIMODAL_DEFAULT_MODELS = new Set(["Claude-Sonnet-4", "Claude-Opus-4", "Claude-Opus"]);
+const MAX_FRAME_BYTES = 675000;
+const MAX_TOTAL_FRAME_BYTES = 6000000;
+const MAX_TRANSCRIPT_CHARS = 50000;
+
+let currentFile = null;
+let extractedFrames = [];
+let videoMetadata = {};
+let transcriptText = "";
+let lastAnalysisResult = null;
+
+function restoreSettings() {
+  try {
+    poeApiKeyInput.value = localStorage.getItem(POE_API_KEY_STORAGE_KEY) || "";
+    localAsrPathInput.value = localStorage.getItem(LOCAL_ASR_PATH_STORAGE_KEY) || "";
+    localAsrModelInput.value = localStorage.getItem(LOCAL_ASR_MODEL_STORAGE_KEY) || localAsrModelInput.value;
+    const storedModel = localStorage.getItem(POE_MODEL_STORAGE_KEY) || "";
+    poeModelInput.value =
+      !storedModel || LEGACY_MULTIMODAL_DEFAULT_MODELS.has(storedModel)
+        ? MULTIMODAL_DEFAULT_MODEL
+        : storedModel;
+  } catch {
+    // Local storage can be unavailable in locked-down browser contexts.
+  }
+}
+
+function cacheSettings() {
+  try {
+    const apiKey = poeApiKeyInput.value.trim();
+    const model = poeModelInput.value.trim();
+    if (apiKey) localStorage.setItem(POE_API_KEY_STORAGE_KEY, apiKey);
+    else localStorage.removeItem(POE_API_KEY_STORAGE_KEY);
+    if (model) localStorage.setItem(POE_MODEL_STORAGE_KEY, model);
+    const localAsrPath = localAsrPathInput.value.trim();
+    const localAsrModel = localAsrModelInput.value.trim();
+    if (localAsrPath) localStorage.setItem(LOCAL_ASR_PATH_STORAGE_KEY, localAsrPath);
+    else localStorage.removeItem(LOCAL_ASR_PATH_STORAGE_KEY);
+    if (localAsrModel) localStorage.setItem(LOCAL_ASR_MODEL_STORAGE_KEY, localAsrModel);
+  } catch {
+    // Keep visible settings for this page session.
+  }
+}
+
+function setStatus(text, state = "idle") {
+  statusBadge.textContent = text;
+  statusBadge.className = "badge";
+  if (state === "ok") statusBadge.classList.add("badge-ok");
+  if (state === "warn") statusBadge.classList.add("badge-warn");
+  if (state === "error") statusBadge.classList.add("badge-error");
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size >= 1024 * 1024 * 1024) return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+function formatTime(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  const minutes = Math.floor(value / 60);
+  const rest = Math.floor(value % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+function dataUrlSize(dataUrl) {
+  return Math.round((String(dataUrl || "").length * 3) / 4);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error("文件读取失败")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error("文件读取失败")));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+function normalizeTranscriptText(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim()
+    .slice(0, MAX_TRANSCRIPT_CHARS);
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image));
+    image.addEventListener("error", () => reject(new Error("图片无法读取")));
+    image.src = src;
+  });
+}
+
+function targetSize(width, height, maxEdge) {
+  const edge = Math.max(width, height);
+  if (!edge || edge <= maxEdge) return { width, height };
+  const ratio = maxEdge / edge;
+  return {
+    width: Math.max(1, Math.round(width * ratio)),
+    height: Math.max(1, Math.round(height * ratio)),
+  };
+}
+
+function canvasToFrame(name, timestampSeconds, sourceWidth, sourceHeight) {
+  const quality = Number(jpegQualityInput.value || 0.72);
+  const dataUrl = frameCanvas.toDataURL("image/jpeg", quality);
+  return {
+    name,
+    type: "image/jpeg",
+    size: dataUrlSize(dataUrl),
+    data_url: dataUrl,
+    timestamp_seconds: timestampSeconds,
+    source_width: sourceWidth,
+    source_height: sourceHeight,
+  };
+}
+
+function renderFrames() {
+  frameStrip.innerHTML = "";
+  if (!extractedFrames.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "选择图片或视频后，这里显示将送入模型的帧。";
+    frameStrip.appendChild(empty);
+    frameMeta.textContent = "等待材料";
+    return;
+  }
+  for (const frame of extractedFrames) {
+    const card = document.createElement("div");
+    card.className = "frame-card";
+    const image = document.createElement("img");
+    image.src = frame.data_url;
+    image.alt = frame.name;
+    const label = document.createElement("span");
+    label.textContent =
+      frame.timestamp_seconds === null || frame.timestamp_seconds === undefined
+        ? frame.name
+        : `${formatTime(frame.timestamp_seconds)} · ${formatBytes(frame.size)}`;
+    card.append(image, label);
+    frameStrip.appendChild(card);
+  }
+  const totalSize = extractedFrames.reduce((sum, frame) => sum + (frame.size || 0), 0);
+  frameMeta.textContent = `${extractedFrames.length} 帧 · 约 ${formatBytes(totalSize)} · 只上传这些抽样帧`;
+}
+
+function payloadWarning() {
+  if (!extractedFrames.length) return "";
+  const totalSize = extractedFrames.reduce((sum, frame) => sum + (frame.size || 0), 0);
+  const oversizedFrame = extractedFrames.find((frame) => (frame.size || 0) > MAX_FRAME_BYTES);
+  if (oversizedFrame) {
+    return `单帧过大：${oversizedFrame.name} 约 ${formatBytes(oversizedFrame.size)}。请降低最长边或 JPEG 质量后重新抽帧。`;
+  }
+  if (totalSize > MAX_TOTAL_FRAME_BYTES) {
+    return `抽样帧总量过大：约 ${formatBytes(totalSize)}。请减少抽帧数量、降低最长边或 JPEG 质量后重新抽帧。`;
+  }
+  return "";
+}
+
+function resetFrames() {
+  extractedFrames = [];
+  videoMetadata = {};
+  renderFrames();
+}
+
+async function compressImageFile(file) {
+  const dataUrl = await readFileAsDataUrl(file);
+  const image = await loadImage(dataUrl);
+  const maxEdge = Number(frameMaxEdgeInput.value || 960);
+  const size = targetSize(image.naturalWidth || image.width, image.naturalHeight || image.height, maxEdge);
+  frameCanvas.width = size.width;
+  frameCanvas.height = size.height;
+  const context = frameCanvas.getContext("2d");
+  context.drawImage(image, 0, 0, size.width, size.height);
+  return [
+    canvasToFrame(
+      `${file.name.replace(/\.[^.]+$/, "") || "image"}-frame.jpg`,
+      null,
+      image.naturalWidth || image.width,
+      image.naturalHeight || image.height,
+    ),
+  ];
+}
+
+function waitForVideoEvent(eventName) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      videoProbe.removeEventListener(eventName, onEvent);
+      videoProbe.removeEventListener("error", onError);
+    };
+    const onEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("视频无法读取，可能是编码不受浏览器支持"));
+    };
+    videoProbe.addEventListener(eventName, onEvent, { once: true });
+    videoProbe.addEventListener("error", onError, { once: true });
+  });
+}
+
+async function loadVideo(file) {
+  if (videoProbe.src) URL.revokeObjectURL(videoProbe.src);
+  const url = URL.createObjectURL(file);
+  const loaded = waitForVideoEvent("loadedmetadata");
+  videoProbe.src = url;
+  videoProbe.load();
+  await loaded;
+  return url;
+}
+
+function sampleTimes(duration, count) {
+  if (!Number.isFinite(duration) || duration <= 0) return [0];
+  if (count <= 1) return [Math.min(duration * 0.5, Math.max(0, duration - 0.1))];
+  const safeStart = Math.min(0.5, Math.max(0, duration * 0.02));
+  const safeEnd = Math.max(safeStart, duration - Math.min(0.5, duration * 0.02));
+  const times = [];
+  for (let index = 0; index < count; index += 1) {
+    const ratio = index / (count - 1);
+    times.push(Number((safeStart + (safeEnd - safeStart) * ratio).toFixed(2)));
+  }
+  return times;
+}
+
+async function seekVideo(seconds) {
+  const target = Math.min(Math.max(0, seconds), Math.max(0, videoProbe.duration - 0.05));
+  if (Math.abs(videoProbe.currentTime - target) < 0.04) return;
+  const seeked = waitForVideoEvent("seeked");
+  videoProbe.currentTime = target;
+  await seeked;
+}
+
+async function extractVideoFrames(file) {
+  const objectUrl = await loadVideo(file);
+  const duration = Number(videoProbe.duration || 0);
+  const width = videoProbe.videoWidth || 0;
+  const height = videoProbe.videoHeight || 0;
+  const frameLimit = Number(frameLimitInput.value || 16);
+  const maxEdge = Number(frameMaxEdgeInput.value || 960);
+  const times = sampleTimes(duration, frameLimit);
+  const size = targetSize(width, height, maxEdge);
+  const frames = [];
+  frameCanvas.width = size.width;
+  frameCanvas.height = size.height;
+  const canvasContext = frameCanvas.getContext("2d");
+
+  videoMetadata = {
+    duration_seconds: Number(duration.toFixed(2)),
+    width,
+    height,
+    source_size_bytes: file.size,
+    extracted_frame_limit: frameLimit,
+    frame_max_edge: maxEdge,
+    sampling_strategy: "uniform-local-browser-sampling",
+  };
+
+  try {
+    for (let index = 0; index < times.length; index += 1) {
+      const seconds = times[index];
+      setStatus(`抽帧 ${index + 1}/${times.length}`, "warn");
+      await seekVideo(seconds);
+      canvasContext.drawImage(videoProbe, 0, 0, size.width, size.height);
+      frames.push(
+        canvasToFrame(
+          `${file.name.replace(/\.[^.]+$/, "") || "video"}-t${formatTime(seconds)}.jpg`,
+          seconds,
+          width,
+          height,
+        ),
+      );
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+    videoProbe.removeAttribute("src");
+    videoProbe.load();
+  }
+  return frames;
+}
+
+async function extractFrames() {
+  if (!currentFile) {
+    setStatus("缺少文件", "warn");
+    return;
+  }
+  extractButton.disabled = true;
+  analyzeButton.disabled = true;
+  resultText.textContent = "正在本地抽样，不上传原始文件。";
+  try {
+    if (currentFile.type.startsWith("image/")) {
+      extractedFrames = await compressImageFile(currentFile);
+      videoMetadata = {};
+    } else if (currentFile.type.startsWith("video/")) {
+      extractedFrames = await extractVideoFrames(currentFile);
+    } else {
+      extractedFrames = [];
+      videoMetadata = {};
+      throw new Error("当前只支持图片和视频文件");
+    }
+    renderFrames();
+    setStatus("已抽样", "ok");
+    resultText.textContent = "抽样完成，可以继续补充说明或直接分析。";
+  } catch (error) {
+    setStatus("抽样失败", "error");
+    resultText.textContent = `抽样失败：${error.message}`;
+  } finally {
+    extractButton.disabled = false;
+    analyzeButton.disabled = false;
+  }
+}
+
+function formatAnalysisList(title, values) {
+  if (!Array.isArray(values) || values.length === 0) return `${title}\n- 暂无`;
+  return `${title}\n${values.map((item) => `- ${typeof item === "string" ? item : JSON.stringify(item)}`).join("\n")}`;
+}
+
+function candidateText(item) {
+  if (typeof item === "string") return item;
+  return String(item?.candidate || item?.text || "").trim();
+}
+
+function normalizeConfirmationCandidates(analysis) {
+  const source = Array.isArray(analysis?.memory_candidates) ? analysis.memory_candidates : [];
+  return source
+    .map((item, index) => ({
+      id: `candidate-${index}`,
+      source_type: "memory_candidate",
+      candidate: candidateText(item),
+      scope: typeof item === "object" && item ? String(item.scope || "short_term") : "short_term",
+      confidence: typeof item === "object" && item ? String(item.confidence || "medium") : "medium",
+      needs_user_confirmation: typeof item === "object" && item ? item.needs_user_confirmation !== false : true,
+      evidence: typeof item === "object" && item ? String(item.evidence || item.reason || "") : "",
+    }))
+    .filter((item) => item.candidate);
+}
+
+function option(value, label, selectedValue) {
+  const node = document.createElement("option");
+  node.value = value;
+  node.textContent = label;
+  node.selected = value === selectedValue;
+  return node;
+}
+
+function hideConfirmationPanel() {
+  confirmationList.innerHTML = "";
+  confirmationPanel.classList.add("hidden");
+  confirmSelectedButton.disabled = false;
+}
+
+function createCandidateCard(item) {
+  const card = document.createElement("article");
+  card.className = "confirm-card";
+  card.dataset.sourceType = item.source_type;
+
+  const head = document.createElement("div");
+  head.className = "confirm-card-head";
+  const checkLabel = document.createElement("label");
+  checkLabel.className = "confirm-check";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "confirm-card-check";
+  checkbox.checked = item.needs_user_confirmation;
+  const labelText = document.createElement("span");
+  labelText.textContent = item.needs_user_confirmation ? "确认后注入" : "候选，可选注入";
+  checkLabel.append(checkbox, labelText);
+  const pill = document.createElement("span");
+  pill.className = "confirm-pill";
+  pill.textContent = item.source_type === "memory_candidate" ? "记忆候选" : "确认补充";
+  head.append(checkLabel, pill);
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "confirm-candidate";
+  textarea.value = item.candidate;
+
+  const grid = document.createElement("div");
+  grid.className = "confirm-grid";
+  const scopeLabel = document.createElement("label");
+  const scopeTitle = document.createElement("span");
+  scopeTitle.textContent = "注入范围";
+  const scopeSelect = document.createElement("select");
+  scopeSelect.className = "confirm-scope";
+  [["self_core_candidate", "SelfCore 候选"]].forEach(([value, label]) => scopeSelect.appendChild(option(value, label, "self_core_candidate")));
+  scopeSelect.disabled = true;
+  scopeLabel.append(scopeTitle, scopeSelect);
+
+  const confidenceLabel = document.createElement("label");
+  const confidenceTitle = document.createElement("span");
+  confidenceTitle.textContent = "置信度";
+  const confidenceSelect = document.createElement("select");
+  confidenceSelect.className = "confirm-confidence";
+  [
+    ["low", "低"],
+    ["medium", "中"],
+    ["high", "高"],
+  ].forEach(([value, label]) => confidenceSelect.appendChild(option(value, label, item.confidence)));
+  confidenceLabel.append(confidenceTitle, confidenceSelect);
+  grid.append(scopeLabel, confidenceLabel);
+
+  card.append(head, textarea, grid);
+  if (item.evidence) {
+    const evidence = document.createElement("p");
+    evidence.className = "confirm-evidence";
+    evidence.textContent = `证据：${item.evidence}`;
+    card.appendChild(evidence);
+  }
+  return card;
+}
+
+function createQuestionCard(question, index) {
+  const card = document.createElement("article");
+  card.className = "confirm-card question";
+  card.dataset.sourceType = "question_answer";
+  card.dataset.question = question;
+
+  const head = document.createElement("div");
+  head.className = "confirm-card-head";
+  const label = document.createElement("label");
+  label.className = "confirm-check";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "confirm-card-check";
+  checkbox.checked = false;
+  const labelText = document.createElement("span");
+  labelText.textContent = `补充确认 ${index + 1}`;
+  label.append(checkbox, labelText);
+  const pill = document.createElement("span");
+  pill.className = "confirm-pill";
+  pill.textContent = "需要回答";
+  head.append(label, pill);
+
+  const prompt = document.createElement("p");
+  prompt.className = "confirm-evidence";
+  prompt.textContent = question;
+  const textarea = document.createElement("textarea");
+  textarea.className = "confirm-candidate";
+  textarea.placeholder = "填写你的确认或修正；勾选后会作为补充证据注入";
+  card.append(head, prompt, textarea);
+  return card;
+}
+
+function renderConfirmationPanel(result) {
+  const analysis = result?.analysis || {};
+  const candidates = normalizeConfirmationCandidates(analysis);
+  const questions = Array.isArray(analysis.questions_for_user) ? analysis.questions_for_user.filter(Boolean) : [];
+  confirmationList.innerHTML = "";
+
+  for (const item of candidates) {
+    confirmationList.appendChild(createCandidateCard(item));
+  }
+  for (const [index, question] of questions.entries()) {
+    confirmationList.appendChild(createQuestionCard(String(question), index));
+  }
+
+  if (!confirmationList.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "confirm-message";
+    empty.textContent = "这次没有需要页面确认的候选。";
+    confirmationList.appendChild(empty);
+  }
+  confirmationPanel.classList.remove("hidden");
+}
+
+function collectConfirmations() {
+  const confirmations = [];
+  const questionAnswers = [];
+  for (const card of confirmationList.querySelectorAll(".confirm-card")) {
+    const checked = card.querySelector(".confirm-card-check")?.checked;
+    if (!checked) continue;
+    const text = card.querySelector(".confirm-candidate")?.value.trim() || "";
+    if (!text) continue;
+    const sourceType = card.dataset.sourceType || "memory_candidate";
+    if (sourceType === "question_answer") {
+      questionAnswers.push({
+        question: card.dataset.question || "",
+        answer: text,
+      });
+      continue;
+    }
+    confirmations.push({
+      candidate: text,
+      scope: "self_core_candidate",
+      confidence: card.querySelector(".confirm-confidence")?.value || "medium",
+      source_type: sourceType,
+    });
+  }
+  return { confirmations, question_answers: questionAnswers };
+}
+
+async function confirmSelectedCandidates() {
+  if (!lastAnalysisResult) {
+    resultMeta.textContent = "先完成一次分析，再确认注入";
+    return;
+  }
+  const payload = collectConfirmations();
+  if (!payload.confirmations.length && !payload.question_answers.length) {
+    resultMeta.textContent = "先勾选要注入的候选或补充确认";
+    return;
+  }
+  confirmSelectedButton.disabled = true;
+  resultMeta.textContent = "正在注入数字生命记忆层...";
+  try {
+    const response = await fetch("/api/multimodal/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: targetInput.value,
+        source_saved_path: lastAnalysisResult.saved_path || "",
+        analysis_summary: lastAnalysisResult.analysis?.summary || "",
+        ...payload,
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "确认注入失败");
+    const count = data.result?.injected_count || 0;
+    resultMeta.textContent = `已注入 ${count} 条确认特征`;
+    setStatus("已注入", "ok");
+  } catch (error) {
+    resultMeta.textContent = `注入失败：${error.message}`;
+    setStatus("注入失败", "error");
+  } finally {
+    confirmSelectedButton.disabled = false;
+  }
+}
+
+function renderAnalysis(result) {
+  if (result.error) {
+    setStatus("分析失败", "error");
+    resultMeta.textContent = "模型没有返回可用结果";
+    hideConfirmationPanel();
+    lastAnalysisResult = null;
+    const attempts = Array.isArray(result.attempts)
+      ? result.attempts
+          .map((item) => {
+            const size = formatBytes(item.total_bytes || 0);
+            const error = item.error ? `：${item.error}` : "";
+            return `- ${item.variant} / ${item.file_count} 帧 / ${size}${error}`;
+          })
+          .join("\n")
+      : "";
+    resultText.textContent = [`分析失败：${result.error}`, attempts ? `\n重试记录：\n${attempts}` : ""]
+      .filter(Boolean)
+      .join("\n");
+    return;
+  }
+  lastAnalysisResult = result;
+  const analysis = result.analysis || {};
+  const candidates = Array.isArray(analysis.memory_candidates)
+    ? analysis.memory_candidates.map((item) => {
+        if (typeof item === "string") return item;
+        return `${item.candidate || "--"}（${item.scope || "unknown"} / ${item.confidence || "unknown"} / ${
+          item.needs_user_confirmation ? "需确认" : "可候选"
+        }）`;
+      })
+    : [];
+  resultText.textContent = [
+    `摘要：${analysis.summary || "--"}`,
+    "",
+    formatAnalysisList("时间线事件", analysis.timeline_events),
+    "",
+    `交流内容：${analysis.conversation_summary || "--"}`,
+    "",
+    formatAnalysisList("沟通气氛", analysis.communication_atmosphere),
+    "",
+    formatAnalysisList("态度/立场信号", analysis.attitude_signals),
+    "",
+    formatAnalysisList("互动风格", analysis.interaction_style),
+    "",
+    formatAnalysisList("直接观察", analysis.observations),
+    "",
+    formatAnalysisList("自我理解信号", analysis.self_signals),
+    "",
+    formatAnalysisList("表达风格信号", analysis.expression_signals),
+    "",
+    formatAnalysisList("关系/场景信号", analysis.relationship_signals),
+    "",
+    formatAnalysisList("记忆候选", candidates),
+    "",
+    formatAnalysisList("风险标记", analysis.risk_flags),
+    "",
+    formatAnalysisList("需要你确认", analysis.questions_for_user),
+    "",
+    `建议动作：${analysis.recommended_next_action || "--"}`,
+    result.saved_path ? `保存位置：${result.saved_path}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  resultMeta.textContent = result.saved_path ? "已保存候选记录" : "未保存候选记录";
+  renderConfirmationPanel(result);
+  setStatus("已分析", "ok");
+}
+
+function frameTimelineText() {
+  if (!extractedFrames.length) return "";
+  return extractedFrames
+    .map((frame, index) => {
+      const label =
+        frame.timestamp_seconds === null || frame.timestamp_seconds === undefined
+          ? "image"
+          : formatTime(frame.timestamp_seconds);
+      return `${index + 1}. ${label} · ${frame.name}`;
+    })
+    .join("\n");
+}
+
+async function analyzeMaterial() {
+  const apiKey = poeApiKeyInput.value.trim();
+  const note = noteInput.value.trim();
+  const context = contextInput.value.trim();
+  const timelineText = timelineTextInput.value.trim();
+  if (!apiKey) {
+    setStatus("缺少 Key", "warn");
+    resultText.textContent = "先输入 Poe API Key。";
+    poeApiKeyInput.focus();
+    return;
+  }
+  const currentIsAudio = currentFile?.type.startsWith("audio/");
+  const currentIsVisual = currentFile?.type.startsWith("image/") || currentFile?.type.startsWith("video/");
+  if (!currentFile && !note && !context && !timelineText && !transcriptText) {
+    setStatus("缺少材料", "warn");
+    resultText.textContent = "先选择文件，或者填写材料说明。";
+    return;
+  }
+  if (currentIsAudio && !timelineText && !transcriptText) {
+    setStatus("缺少转写", "warn");
+    resultText.textContent = "音频文件请先点击 ASR 转写，或手动填写转写/时间线。";
+    return;
+  }
+  if (currentIsVisual && !extractedFrames.length) {
+    await extractFrames();
+    if (!extractedFrames.length) return;
+  }
+  const warning = payloadWarning();
+  if (warning) {
+    setStatus("材料过大", "warn");
+    resultText.textContent = warning;
+    return;
+  }
+
+  analyzeButton.disabled = true;
+  extractButton.disabled = true;
+  setStatus("分析中", "warn");
+  hideConfirmationPanel();
+  lastAnalysisResult = null;
+  resultText.textContent = "模型正在综合抽样帧、转写和说明，整理成可校对候选。";
+  const mediaKind = currentFile?.type.startsWith("video/") ? "video_sampled_frames" : currentFile?.type.startsWith("image/") ? "image" : "text_only";
+  const timelineHasTranscript =
+    transcriptText && timelineText.includes(transcriptText.slice(0, Math.min(120, transcriptText.length)));
+  const transcriptBlock = transcriptText && !timelineHasTranscript ? `字幕/ASR 转写：\n${transcriptText}` : "";
+  try {
+    const response = await fetch("/api/multimodal/intake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: targetInput.value,
+        media_kind: currentFile?.type.startsWith("audio/") ? "audio_asr" : mediaKind,
+        source_name: currentFile?.name || "",
+        note,
+        context,
+        timeline_text: [transcriptBlock, timelineText, frameTimelineText() ? `抽样帧：\n${frameTimelineText()}` : ""]
+          .filter(Boolean)
+          .join("\n\n"),
+        video_metadata: videoMetadata,
+        files: extractedFrames,
+        poe_api_key: apiKey,
+        poe_model: poeModelInput.value.trim(),
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "分析失败");
+    renderAnalysis(data.result);
+  } catch (error) {
+    setStatus("分析失败", "error");
+    resultText.textContent = `分析失败：${error.message}`;
+  } finally {
+    analyzeButton.disabled = false;
+    extractButton.disabled = false;
+  }
+}
+
+function onFileSelected() {
+  currentFile = mediaFileInput.files?.[0] || null;
+  resetFrames();
+  if (!currentFile) {
+    sourceMeta.textContent = "未选择文件";
+    setStatus("待摄入");
+    resultText.textContent = "等待分析。";
+    hideConfirmationPanel();
+    lastAnalysisResult = null;
+    return;
+  }
+  sourceMeta.textContent = `${currentFile.name} · ${currentFile.type || "unknown"} · ${formatBytes(currentFile.size)}`;
+  const isVideo = currentFile.type.startsWith("video/");
+  const isAudio = currentFile.type.startsWith("audio/");
+  setStatus(isVideo ? "待抽帧" : isAudio ? "待 ASR" : "待压缩", "warn");
+  resultText.textContent = isVideo
+    ? "视频会在浏览器本地抽帧；本地 Whisper 转写请在同一来源区填写磁盘路径。"
+    : isAudio
+      ? "音频文件可作为材料；本地 Whisper 转写请在同一来源区填写磁盘路径。"
+    : "图片会在浏览器本地压缩后送入模型。";
+}
+
+function clearAll() {
+  mediaFileInput.value = "";
+  transcriptFileInput.value = "";
+  currentFile = null;
+  transcriptText = "";
+  noteInput.value = "";
+  contextInput.value = "";
+  timelineTextInput.value = "";
+  sourceMeta.textContent = "未选择文件";
+  transcriptMeta.textContent = "可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原";
+  resultMeta.textContent = "不会直接改写 SelfCore";
+  resultText.textContent = "等待分析。";
+  hideConfirmationPanel();
+  lastAnalysisResult = null;
+  setStatus("待摄入");
+  resetFrames();
+}
+
+async function onTranscriptSelected() {
+  const file = transcriptFileInput.files?.[0] || null;
+  transcriptText = "";
+  if (!file) {
+    transcriptMeta.textContent = "可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原";
+    return;
+  }
+  try {
+    const rawText = await readFileAsText(file);
+    transcriptText = normalizeTranscriptText(rawText);
+    const clipped = rawText.length > transcriptText.length ? " · 已截取前 50000 字" : "";
+    transcriptMeta.textContent = `${file.name} · ${formatBytes(file.size)} · ${transcriptText.length} 字${clipped}`;
+  } catch (error) {
+    transcriptMeta.textContent = `转写读取失败：${error.message}`;
+    transcriptText = "";
+  }
+}
+
+async function runLocalWhisperAsr() {
+  const localPath = localAsrPathInput.value.trim();
+  if (!localPath) {
+    setStatus("缺少路径", "warn");
+    resultText.textContent = "把大视频复制到项目 tmp 目录或 C:\\tmp，然后在这里填完整本地路径。";
+    localAsrPathInput.focus();
+    return;
+  }
+  cacheSettings();
+  localAsrButton.disabled = true;
+  analyzeButton.disabled = true;
+  extractButton.disabled = true;
+  setStatus("本地 ASR 中", "warn");
+  resultText.textContent = [
+    "本地 Whisper 正在读取磁盘文件并转写。",
+    "首次使用某个模型会下载模型权重，会慢一些。",
+    "长视频会阻塞一段时间，先别刷新页面。",
+  ].join("\n");
+  try {
+    const response = await fetch("/api/multimodal/local-asr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        local_path: localPath,
+        local_model: localAsrModelInput.value,
+        compute_type: localAsrComputeInput.value,
+        language: localAsrLanguageInput.value || "zh",
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "本地 Whisper 转写失败");
+    const text = data.result?.text || "";
+    transcriptText = normalizeTranscriptText(text);
+    timelineTextInput.value = [timelineTextInput.value.trim(), transcriptText ? `本地 Whisper 转写：\n${transcriptText}` : ""]
+      .filter(Boolean)
+      .join("\n\n");
+    transcriptMeta.textContent = `本地 Whisper 完成 · ${data.result?.model || "--"} · ${transcriptText.length} 字`;
+    resultText.textContent = [
+      transcriptText || "本地 Whisper 完成，但没有识别到文字。",
+      data.result?.saved_path ? `\n保存位置：${data.result.saved_path}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    setStatus("本地 ASR 完成", "ok");
+  } catch (error) {
+    setStatus("本地 ASR 失败", "error");
+    resultText.textContent = `本地 ASR 失败：${error.message}`;
+  } finally {
+    localAsrButton.disabled = false;
+    analyzeButton.disabled = false;
+    extractButton.disabled = false;
+  }
+}
+
+clearPoeApiKeyButton.addEventListener("click", () => {
+  poeApiKeyInput.value = "";
+  cacheSettings();
+  poeApiKeyInput.focus();
+});
+poeApiKeyInput.addEventListener("change", cacheSettings);
+poeApiKeyInput.addEventListener("blur", cacheSettings);
+poeModelInput.addEventListener("change", cacheSettings);
+poeModelInput.addEventListener("blur", cacheSettings);
+localAsrPathInput.addEventListener("change", cacheSettings);
+localAsrPathInput.addEventListener("blur", cacheSettings);
+localAsrModelInput.addEventListener("change", cacheSettings);
+localAsrModelInput.addEventListener("blur", cacheSettings);
+mediaFileInput.addEventListener("change", onFileSelected);
+transcriptFileInput.addEventListener("change", onTranscriptSelected);
+extractButton.addEventListener("click", extractFrames);
+localAsrButton.addEventListener("click", runLocalWhisperAsr);
+analyzeButton.addEventListener("click", analyzeMaterial);
+clearButton.addEventListener("click", clearAll);
+confirmSelectedButton.addEventListener("click", confirmSelectedCandidates);
+
+restoreSettings();
+renderFrames();

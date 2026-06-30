@@ -1,0 +1,11 @@
+{
+  "groups": ["测试群"],
+  "self_names": ["我的群昵称"],
+  "keywords": [],
+  "adapter": "manual",
+  "dashboard_url": "http://127.0.0.1:8788",
+  "context_limit": 80,
+  "auto_send": false,
+  "reply_settle_seconds": 10,
+  "reply_cooldown_seconds": 90
+}

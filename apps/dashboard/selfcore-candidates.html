@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SelfCore 候选工作台</title>
+    <link rel="stylesheet" href="/selfcore-candidates.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>SelfCore 候选工作台</h1>
+          <p>汇总多模态确认候选，合并特征，最终注入 SelfCore。</p>
+        </div>
+        <nav class="nav">
+          <a href="/multimodal.html">多模态摄入</a>
+          <a href="/">关系页</a>
+        </nav>
+      </header>
+
+      <section class="toolbar panel">
+        <label>
+          <span>Poe API Key（可选，用于 AI 合并）</span>
+          <input id="poeApiKey" type="password" autocomplete="off" placeholder="pkey-..." />
+        </label>
+        <label>
+          <span>合并模型</span>
+          <input id="poeModel" autocomplete="off" value="GPT-4o" />
+        </label>
+        <label class="toggle">
+          <input id="useModel" type="checkbox" />
+          <span>使用模型合并</span>
+        </label>
+        <button type="button" id="refreshButton" class="ghost">刷新候选</button>
+        <button type="button" id="mergeButton">合并选中</button>
+      </section>
+
+      <section class="summary-row">
+        <div class="metric panel">
+          <strong id="pendingCount">0</strong>
+          <span>待处理候选</span>
+        </div>
+        <div class="metric panel">
+          <strong id="totalCount">0</strong>
+          <span>候选总数</span>
+        </div>
+        <div class="metric panel">
+          <strong id="proposalCount">0</strong>
+          <span>合并提案</span>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <section class="panel candidate-panel">
+          <div class="panel-head">
+            <div>
+              <h2>候选池</h2>
+              <p id="candidateMeta">读取已确认的多模态 SelfCore 候选</p>
+            </div>
+            <button type="button" class="ghost" id="selectAllButton">全选待处理</button>
+          </div>
+          <div class="candidate-list" id="candidateList"></div>
+        </section>
+
+        <section class="panel proposal-panel">
+          <div class="panel-head">
+            <div>
+              <h2>合并提案</h2>
+              <p id="proposalMeta">先选择候选并合并</p>
+            </div>
+          </div>
+          <div class="proposal-list" id="proposalList"></div>
+        </section>
+
+        <section class="panel inject-panel">
+          <div class="panel-head">
+            <div>
+              <h2>注入 SelfCore</h2>
+              <p id="injectMeta">只会注入你勾选的提案</p>
+            </div>
+          </div>
+          <pre id="injectPreview">等待合并提案。</pre>
+          <button type="button" id="injectButton">确认注入 SelfCore</button>
+        </section>
+      </section>
+    </main>
+    <script src="/selfcore-candidates.js"></script>
+  </body>
+</html>

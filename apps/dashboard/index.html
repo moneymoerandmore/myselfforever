@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>数字分身 Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>数字分身</h1>
+          <p>关系页 · 草稿模拟 · v0.2</p>
+        </div>
+        <div class="top-controls">
+          <label class="key-field">
+            <span>Poe API Key</span>
+            <div class="key-input-row">
+              <input id="poeApiKey" type="password" autocomplete="off" placeholder="pkey-..." />
+              <button type="button" class="key-clear" id="clearPoeApiKey" title="清除本地缓存">清除</button>
+            </div>
+          </label>
+          <label class="model-field">
+            <span>模型</span>
+            <input id="poeModel" autocomplete="off" value="Claude-Sonnet-4" />
+          </label>
+          <div class="status" id="healthStatus">连接中</div>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="people-panel">
+          <section class="monitor-card">
+            <div class="monitor-card-head">
+              <div>
+                <h2>群监控</h2>
+                <p id="groupMonitorStatus">未连接</p>
+              </div>
+              <button type="button" class="monitor-button" id="groupMonitorButton">启动监控</button>
+            </div>
+
+            <label>
+              <span>群名</span>
+              <input id="monitorGroupName" autocomplete="off" value="梯妹日常AI炒股打游戏" />
+            </label>
+
+            <div class="monitor-grid">
+              <label>
+                <span>我的群昵称</span>
+                <input id="monitorSelfName" autocomplete="off" value="一糖" />
+              </label>
+              <label>
+                <span>回复模式</span>
+                <select id="groupReplyMode" class="monitor-select" aria-label="群监控回复模式">
+                  <option value="observe">只读</option>
+                  <option value="draft">自动草稿</option>
+                  <option value="send">自动发送</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="monitor-grid">
+              <label>
+                <span>沉淀秒数</span>
+                <input id="replySettleSeconds" type="number" min="3" max="60" step="1" value="10" />
+              </label>
+              <label>
+                <span>冷却秒数</span>
+                <input id="replyCooldownSeconds" type="number" min="15" max="600" step="5" value="90" />
+              </label>
+            </div>
+          </section>
+
+          <div class="people-tools">
+            <label>
+              <span>搜索关系链</span>
+              <input id="personFilter" autocomplete="off" placeholder="称呼 / 微信名 / 关系 / 主题" />
+            </label>
+            <label>
+              <span>关系分类</span>
+              <select id="categoryFilter">
+                <option value="all">全部分类</option>
+              </select>
+            </label>
+            <div class="segments" role="tablist" aria-label="联系人范围">
+              <button type="button" class="segment active" data-filter="all">全部</button>
+              <button type="button" class="segment" data-filter="direct">直接</button>
+              <button type="button" class="segment" data-filter="mentioned">提及</button>
+            </div>
+          </div>
+          <div class="people-meta">
+            <span id="peopleMeta">加载关系链中...</span>
+            <span id="peopleBreakdown">--</span>
+          </div>
+          <div class="people-list" id="peopleList"></div>
+        </aside>
+
+        <section class="main-panel">
+          <section class="profile-panel">
+            <div class="profile-head">
+              <div>
+                <h2 id="profileName">选择联系人</h2>
+                <p id="profileSubtitle">从左侧关系链选择一个人。</p>
+              </div>
+              <span class="risk risk-idle" id="permissionBadge">--</span>
+            </div>
+
+            <div class="profile-grid">
+              <article>
+                <h3>关系定位</h3>
+                <p id="relationshipPositioning">--</p>
+              </article>
+              <article>
+                <h3>称呼证据</h3>
+                <p id="callEvidence">--</p>
+              </article>
+              <article>
+                <h3>共同话题</h3>
+                <p id="frequentTopics">--</p>
+              </article>
+              <article>
+                <h3>主要场景</h3>
+                <p id="mainScenes">--</p>
+              </article>
+              <article class="wide">
+                <h3>可主动沟通权限</h3>
+                <p id="permissionText">--</p>
+              </article>
+              <article class="wide dyadic-summary">
+                <h3>对这个人的沟通表现型</h3>
+                <p id="dyadicProfileText">--</p>
+              </article>
+            </div>
+          </section>
+
+          <form class="composer" id="draftForm">
+            <div class="composer-head">
+              <div>
+                <h2>模拟交互</h2>
+                <p id="composerHint">选择联系人后输入场景。</p>
+              </div>
+              <span class="mode-badge" id="contactModeBadge">未选择</span>
+            </div>
+
+            <div class="field-grid">
+              <label>
+                <span>意图</span>
+                <select id="intent" name="intent">
+                  <option value="work_discussion">工作讨论</option>
+                  <option value="news_discussion">新闻讨论</option>
+                  <option value="casual_chat">闲聊</option>
+                  <option value="decision_request">决策判断</option>
+                  <option value="emotional_support">安慰支持</option>
+                  <option value="family_coordination">家庭协调</option>
+                  <option value="investment_discussion">投资讨论</option>
+                  <option value="logistics">事务确认</option>
+                  <option value="conflict">冲突处理</option>
+                  <option value="unknown">未知</option>
+                </select>
+              </label>
+              <label>
+                <span>模式</span>
+                <select id="mode" name="mode">
+                  <option value="draft">草稿</option>
+                  <option value="observe">观察</option>
+                  <option value="assist_send">确认后发送</option>
+                </select>
+              </label>
+            </div>
+
+            <section class="conversation" aria-label="多轮对话上下文">
+              <div class="conversation-head">
+                <div>
+                  <h3>对话上下文</h3>
+                  <p id="conversationMeta">当前联系人还没有消息</p>
+                </div>
+                <button type="button" class="ghost compact-button" id="clearButton">清空会话</button>
+              </div>
+              <div class="conversation-thread" id="conversationThread" aria-live="polite"></div>
+            </section>
+
+            <div class="message-composer">
+              <div class="speaker-switch" id="speakerSwitch" role="group" aria-label="消息发送方">
+                <button type="button" class="speaker active" data-speaker="contact">对方说</button>
+                <button type="button" class="speaker" data-speaker="self">我说</button>
+              </div>
+              <label class="scenario-field">
+                <span id="scenarioLabel">补充一条消息</span>
+                <textarea id="scenario" name="scenario" rows="3" placeholder="输入对方刚说的话，也可以补录你已经发过的话"></textarea>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button type="button" class="ghost" id="addMessageButton">加入上下文</button>
+              <button type="submit" id="submitButton">生成我的下一条回复</button>
+            </div>
+          </form>
+
+          <section class="output">
+            <div class="output-head">
+              <div>
+                <h2>生成依据</h2>
+                <p id="toneBasis">等待输入</p>
+              </div>
+              <span class="risk risk-idle" id="riskBadge">--</span>
+            </div>
+
+            <pre class="draft status-draft" id="draftText">生成的回复会直接加入上方对话。</pre>
+
+            <div class="detail-grid">
+              <article>
+                <h3>关系依据</h3>
+                <p id="relationshipBasis">--</p>
+              </article>
+              <article>
+                <h3>话题依据</h3>
+                <p id="topicBasis">--</p>
+              </article>
+            </div>
+
+            <section class="confirm-block">
+              <h3>上下文与边界</h3>
+              <ul id="questionsList">
+                <li>暂无</li>
+              </ul>
+            </section>
+
+            <section class="confirm-block">
+              <h3>其他候选</h3>
+              <ul id="candidatesList">
+                <li>暂无</li>
+              </ul>
+            </section>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

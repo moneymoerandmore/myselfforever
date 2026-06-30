@@ -1,0 +1,28 @@
+# Local private data and generated artifacts
+data/raw/
+data/generated/
+outputs/
+artifacts/
+
+# Large derived chat data
+*.jsonl
+!tools/draft-generator/eval_cases.jsonl
+*.sqlite
+*.sqlite3
+*.db
+
+# Local backups and logs
+*.bak
+*.backup
+*.log
+*.tmp
+apps/dashboard/dashboard.pid
+services/wechat-bridge/wechat-bridge.pid
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

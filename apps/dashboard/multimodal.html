@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>多模态摄入 · 数字分身</title>
+    <link rel="stylesheet" href="/multimodal.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>多模态摄入</h1>
+          <p>视频、录屏、截图 → 时间线与记忆候选</p>
+        </div>
+        <div class="top-controls">
+          <label>
+            <span>Poe API Key</span>
+            <div class="key-row">
+              <input id="poeApiKey" type="password" autocomplete="off" placeholder="pkey-..." />
+              <button type="button" class="ghost" id="clearPoeApiKey">清除</button>
+            </div>
+          </label>
+          <label>
+            <span>模型</span>
+            <input id="poeModel" autocomplete="off" value="GPT-4o" list="visionModelPresets" />
+            <datalist id="visionModelPresets">
+              <option value="GPT-4o"></option>
+              <option value="Gemini-2.5-Pro"></option>
+              <option value="Claude-3.5-Sonnet"></option>
+              <option value="Claude-3-Opus"></option>
+            </datalist>
+          </label>
+          <a class="nav-link" href="/selfcore-candidates.html">SelfCore 候选</a>
+          <a class="nav-link" href="/">关系页</a>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <section class="panel intake-panel">
+          <div class="panel-head">
+            <div>
+              <h2>材料</h2>
+              <p id="sourceMeta">未选择文件</p>
+            </div>
+            <span class="badge" id="statusBadge">待摄入</span>
+          </div>
+
+          <div class="source-field">
+            <span>视频/音频来源</span>
+            <input id="mediaFile" type="file" accept="image/*,video/*,audio/*" />
+            <input id="localAsrPath" autocomplete="off" placeholder="本地 Whisper 路径：C:\tmp\video.mp4，或项目 tmp 目录里的文件" />
+            <p class="field-note">选择文件用于抽帧/预览；大视频本地 ASR 请填磁盘路径，浏览器不会暴露完整文件路径。</p>
+          </div>
+
+          <label>
+            <span>字幕/转写文件</span>
+            <input id="transcriptFile" type="file" accept=".txt,.srt,.vtt,text/plain,text/vtt" />
+          </label>
+          <p class="field-note" id="transcriptMeta">可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原</p>
+
+          <div class="grid">
+            <label>
+              <span>本地 Whisper</span>
+              <select id="localAsrModel">
+                <option value="tiny" selected>tiny（最快）</option>
+                <option value="base">base（快）</option>
+                <option value="small">small（更准）</option>
+                <option value="medium">medium（慢）</option>
+              </select>
+            </label>
+            <label>
+              <span>计算精度</span>
+              <select id="localAsrCompute">
+                <option value="int8" selected>CPU int8</option>
+                <option value="float32">CPU float32</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>本地识别语言</span>
+            <select id="localAsrLanguage">
+              <option value="zh" selected>中文</option>
+              <option value="en">English</option>
+              <option value="">自动</option>
+            </select>
+          </label>
+          <button type="button" class="ghost" id="localAsrButton">本地 Whisper 转写</button>
+
+          <div class="grid">
+            <label>
+              <span>材料用途</span>
+              <select id="target">
+                <option value="self_understanding">理解我的偏好/状态</option>
+                <option value="expression_style">提炼表达风格</option>
+                <option value="relationship_context">补充关系/场景</option>
+                <option value="daily_topic">记录近期话题</option>
+              </select>
+            </label>
+            <label>
+              <span>抽帧数量</span>
+              <select id="frameLimit">
+                <option value="4" selected>4 帧</option>
+                <option value="8">8 帧</option>
+                <option value="16">16 帧</option>
+                <option value="24">24 帧</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid">
+            <label>
+              <span>最长边</span>
+              <select id="frameMaxEdge">
+                <option value="480" selected>480px</option>
+                <option value="640">640px</option>
+                <option value="960">960px</option>
+                <option value="1280">1280px</option>
+              </select>
+            </label>
+            <label>
+              <span>JPEG 质量</span>
+              <select id="jpegQuality">
+                <option value="0.52" selected>低</option>
+                <option value="0.68">标准</option>
+                <option value="0.82">高</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            <span>补充说明</span>
+            <textarea id="note" rows="4" placeholder="这段视频为什么代表我？哪些内容不要过度推断？"></textarea>
+          </label>
+
+          <label>
+            <span>来源上下文</span>
+            <textarea id="context" rows="3" placeholder="例如：某次录屏、一次内容消费、一次沟通复盘"></textarea>
+          </label>
+
+          <label>
+            <span>转写/时间线</span>
+            <textarea id="timelineText" rows="6" placeholder="可以粘贴语音转写、关键操作、你当时的想法。视频里发生了什么不够，最好补上谁说了什么、停顿、打断、笑点、语气变化。"></textarea>
+          </label>
+
+          <div class="actions">
+            <button type="button" class="ghost" id="clearButton">清空</button>
+            <button type="button" class="ghost" id="extractButton">抽取帧</button>
+            <button type="button" id="analyzeButton">分析材料</button>
+          </div>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="panel-head">
+            <div>
+              <h2>抽样时间线</h2>
+              <p id="frameMeta">等待材料</p>
+            </div>
+          </div>
+          <video id="videoProbe" muted playsinline preload="metadata"></video>
+          <canvas id="frameCanvas"></canvas>
+          <div class="frame-strip" id="frameStrip">
+            <div class="empty">选择图片或视频后，这里显示将送入模型的帧。</div>
+          </div>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-head">
+            <div>
+              <h2>候选结果</h2>
+              <p id="resultMeta">不会直接改写 SelfCore</p>
+            </div>
+          </div>
+          <div class="result-body">
+            <pre id="resultText">等待分析。</pre>
+            <section class="confirmation-panel hidden" id="confirmationPanel">
+              <div class="confirm-head">
+                <div>
+                  <h3>需要你确认</h3>
+                  <p>确认后写入数字生命的多模态记忆层，保留来源和证据。</p>
+                </div>
+                <button type="button" id="confirmSelectedButton">确认并注入</button>
+              </div>
+              <div class="confirmation-list" id="confirmationList"></div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/multimodal.js"></script>
+  </body>
+</html>
