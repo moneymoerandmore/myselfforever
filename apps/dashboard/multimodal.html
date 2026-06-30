@@ -89,6 +89,22 @@
 
           <div class="grid">
             <label>
+              <span>HuggingFace Token</span>
+              <input id="hfToken" type="password" autocomplete="off" placeholder="pyannote 说话人分离 token" />
+            </label>
+            <label>
+              <span>声纹身份</span>
+              <input id="speakerDisplayName" autocomplete="off" value="我" />
+            </label>
+          </div>
+          <div class="actions compact-actions">
+            <button type="button" class="ghost" id="enrollSpeakerButton">登记当前音频为声纹</button>
+            <button type="button" class="primary" id="diarizedAsrButton">说话人分离 ASR</button>
+          </div>
+          <p class="field-note" id="speakerProfileMeta">长期方案：pyannote 分离说话人，声纹库识别“我”和不同联系人，再把转写对齐到 speaker。</p>
+
+          <div class="grid">
+            <label>
               <span>材料用途</span>
               <select id="target">
                 <option value="self_understanding">理解我的偏好/状态</option>
@@ -99,12 +115,7 @@
             </label>
             <label>
               <span>抽帧数量</span>
-              <select id="frameLimit">
-                <option value="4" selected>4 帧</option>
-                <option value="8">8 帧</option>
-                <option value="16">16 帧</option>
-                <option value="24">24 帧</option>
-              </select>
+              <input id="frameLimit" type="number" min="1" max="240" step="1" value="24" />
             </label>
           </div>
 

@@ -7,6 +7,8 @@ const localAsrPathInput = document.querySelector("#localAsrPath");
 const localAsrModelInput = document.querySelector("#localAsrModel");
 const localAsrComputeInput = document.querySelector("#localAsrCompute");
 const localAsrLanguageInput = document.querySelector("#localAsrLanguage");
+const hfTokenInput = document.querySelector("#hfToken");
+const speakerDisplayNameInput = document.querySelector("#speakerDisplayName");
 const targetInput = document.querySelector("#target");
 const frameLimitInput = document.querySelector("#frameLimit");
 const frameMaxEdgeInput = document.querySelector("#frameMaxEdge");
@@ -18,8 +20,11 @@ const clearButton = document.querySelector("#clearButton");
 const extractButton = document.querySelector("#extractButton");
 const analyzeButton = document.querySelector("#analyzeButton");
 const localAsrButton = document.querySelector("#localAsrButton");
+const enrollSpeakerButton = document.querySelector("#enrollSpeakerButton");
+const diarizedAsrButton = document.querySelector("#diarizedAsrButton");
 const sourceMeta = document.querySelector("#sourceMeta");
 const transcriptMeta = document.querySelector("#transcriptMeta");
+const speakerProfileMeta = document.querySelector("#speakerProfileMeta");
 const statusBadge = document.querySelector("#statusBadge");
 const videoProbe = document.querySelector("#videoProbe");
 const frameCanvas = document.querySelector("#frameCanvas");
@@ -35,6 +40,8 @@ const POE_API_KEY_STORAGE_KEY = "digitalTwin.poeApiKey";
 const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 const LOCAL_ASR_PATH_STORAGE_KEY = "digitalTwin.localAsrPath";
 const LOCAL_ASR_MODEL_STORAGE_KEY = "digitalTwin.localAsrModel";
+const HF_TOKEN_STORAGE_KEY = "digitalTwin.hfToken";
+const SPEAKER_DISPLAY_NAME_STORAGE_KEY = "digitalTwin.speakerDisplayName";
 const MULTIMODAL_DEFAULT_MODEL = "GPT-4o";
 const LEGACY_MULTIMODAL_DEFAULT_MODELS = new Set(["Claude-Sonnet-4", "Claude-Opus-4", "Claude-Opus"]);
 const MAX_FRAME_BYTES = 675000;
@@ -52,6 +59,9 @@ function restoreSettings() {
     poeApiKeyInput.value = localStorage.getItem(POE_API_KEY_STORAGE_KEY) || "";
     localAsrPathInput.value = localStorage.getItem(LOCAL_ASR_PATH_STORAGE_KEY) || "";
     localAsrModelInput.value = localStorage.getItem(LOCAL_ASR_MODEL_STORAGE_KEY) || localAsrModelInput.value;
+    hfTokenInput.value = localStorage.getItem(HF_TOKEN_STORAGE_KEY) || "";
+    speakerDisplayNameInput.value =
+      localStorage.getItem(SPEAKER_DISPLAY_NAME_STORAGE_KEY) || speakerDisplayNameInput.value || "我";
     const storedModel = localStorage.getItem(POE_MODEL_STORAGE_KEY) || "";
     poeModelInput.value =
       !storedModel || LEGACY_MULTIMODAL_DEFAULT_MODELS.has(storedModel)
@@ -74,6 +84,11 @@ function cacheSettings() {
     if (localAsrPath) localStorage.setItem(LOCAL_ASR_PATH_STORAGE_KEY, localAsrPath);
     else localStorage.removeItem(LOCAL_ASR_PATH_STORAGE_KEY);
     if (localAsrModel) localStorage.setItem(LOCAL_ASR_MODEL_STORAGE_KEY, localAsrModel);
+    const hfToken = hfTokenInput.value.trim();
+    const speakerDisplayName = speakerDisplayNameInput.value.trim();
+    if (hfToken) localStorage.setItem(HF_TOKEN_STORAGE_KEY, hfToken);
+    else localStorage.removeItem(HF_TOKEN_STORAGE_KEY);
+    if (speakerDisplayName) localStorage.setItem(SPEAKER_DISPLAY_NAME_STORAGE_KEY, speakerDisplayName);
   } catch {
     // Keep visible settings for this page session.
   }
@@ -85,6 +100,37 @@ function setStatus(text, state = "idle") {
   if (state === "ok") statusBadge.classList.add("badge-ok");
   if (state === "warn") statusBadge.classList.add("badge-warn");
   if (state === "error") statusBadge.classList.add("badge-error");
+}
+
+function setAsrBusy(isBusy) {
+  localAsrButton.disabled = isBusy;
+  enrollSpeakerButton.disabled = isBusy;
+  diarizedAsrButton.disabled = isBusy;
+  analyzeButton.disabled = isBusy;
+  extractButton.disabled = isBusy;
+}
+
+function currentLocalMediaPath() {
+  return localAsrPathInput.value.trim();
+}
+
+function appendTranscriptToTimeline(label, text) {
+  transcriptText = normalizeTranscriptText(text);
+  timelineTextInput.value = [timelineTextInput.value.trim(), transcriptText ? `${label}：\n${transcriptText}` : ""]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function speakerSummaryText(speakers = []) {
+  if (!speakers.length) return "未检测到可用说话人。";
+  return speakers
+    .map((speaker) => {
+      const name = speaker.display_name || speaker.speaker;
+      const raw = speaker.speaker && speaker.speaker !== name ? `/${speaker.speaker}` : "";
+      const score = speaker.identity?.score ? ` · 匹配 ${speaker.identity.score}` : "";
+      return `${name}${raw} · ${speaker.turn_count || 0} 段 · ${formatTime(speaker.duration || 0)}${score}`;
+    })
+    .join("\n");
 }
 
 function formatBytes(value) {
@@ -274,6 +320,14 @@ function sampleTimes(duration, count) {
   return times;
 }
 
+function normalizedFrameLimit() {
+  const rawValue = Number.parseInt(frameLimitInput.value || "24", 10);
+  const value = Number.isFinite(rawValue) ? rawValue : 24;
+  const normalized = Math.min(240, Math.max(1, value));
+  frameLimitInput.value = String(normalized);
+  return normalized;
+}
+
 async function seekVideo(seconds) {
   const target = Math.min(Math.max(0, seconds), Math.max(0, videoProbe.duration - 0.05));
   if (Math.abs(videoProbe.currentTime - target) < 0.04) return;
@@ -287,7 +341,7 @@ async function extractVideoFrames(file) {
   const duration = Number(videoProbe.duration || 0);
   const width = videoProbe.videoWidth || 0;
   const height = videoProbe.videoHeight || 0;
-  const frameLimit = Number(frameLimitInput.value || 16);
+  const frameLimit = normalizedFrameLimit();
   const maxEdge = Number(frameMaxEdgeInput.value || 960);
   const times = sampleTimes(duration, frameLimit);
   const size = targetSize(width, height, maxEdge);
@@ -788,7 +842,7 @@ async function onTranscriptSelected() {
 }
 
 async function runLocalWhisperAsr() {
-  const localPath = localAsrPathInput.value.trim();
+  const localPath = currentLocalMediaPath();
   if (!localPath) {
     setStatus("缺少路径", "warn");
     resultText.textContent = "把大视频复制到项目 tmp 目录或 C:\\tmp，然后在这里填完整本地路径。";
@@ -796,9 +850,7 @@ async function runLocalWhisperAsr() {
     return;
   }
   cacheSettings();
-  localAsrButton.disabled = true;
-  analyzeButton.disabled = true;
-  extractButton.disabled = true;
+  setAsrBusy(true);
   setStatus("本地 ASR 中", "warn");
   resultText.textContent = [
     "本地 Whisper 正在读取磁盘文件并转写。",
@@ -819,10 +871,7 @@ async function runLocalWhisperAsr() {
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "本地 Whisper 转写失败");
     const text = data.result?.text || "";
-    transcriptText = normalizeTranscriptText(text);
-    timelineTextInput.value = [timelineTextInput.value.trim(), transcriptText ? `本地 Whisper 转写：\n${transcriptText}` : ""]
-      .filter(Boolean)
-      .join("\n\n");
+    appendTranscriptToTimeline("本地 Whisper 转写", text);
     transcriptMeta.textContent = `本地 Whisper 完成 · ${data.result?.model || "--"} · ${transcriptText.length} 字`;
     resultText.textContent = [
       transcriptText || "本地 Whisper 完成，但没有识别到文字。",
@@ -835,9 +884,115 @@ async function runLocalWhisperAsr() {
     setStatus("本地 ASR 失败", "error");
     resultText.textContent = `本地 ASR 失败：${error.message}`;
   } finally {
-    localAsrButton.disabled = false;
-    analyzeButton.disabled = false;
-    extractButton.disabled = false;
+    setAsrBusy(false);
+  }
+}
+
+async function refreshSpeakerProfiles() {
+  try {
+    const response = await fetch("/api/speaker-profiles");
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "声纹库读取失败");
+    const profiles = data.result?.profiles || [];
+    const dependency = data.result?.dependency;
+    const dependencyText = dependency?.available ? "pyannote 已就绪" : `pyannote 未安装 · ${dependency?.install_hint || ""}`;
+    const profileText = profiles.length
+      ? profiles.map((profile) => `${profile.display_name || profile.id} · ${profile.embedding_dimensions || 0} 维`).join("；")
+      : "暂无声纹身份";
+    speakerProfileMeta.textContent = `${dependencyText} · ${profileText}`;
+  } catch (error) {
+    speakerProfileMeta.textContent = `声纹库状态读取失败：${error.message}`;
+  }
+}
+
+async function enrollCurrentSpeaker() {
+  const localPath = currentLocalMediaPath();
+  if (!localPath) {
+    setStatus("缺少路径", "warn");
+    resultText.textContent = "先填入一个本地视频/音频路径，再用这段材料登记声纹。";
+    localAsrPathInput.focus();
+    return;
+  }
+  const displayName = speakerDisplayNameInput.value.trim() || "我";
+  cacheSettings();
+  setAsrBusy(true);
+  setStatus("声纹登记中", "warn");
+  resultText.textContent = "正在从当前音频提取声纹向量，并写入本地声纹身份库。";
+  try {
+    const response = await fetch("/api/speaker-profiles/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        local_path: localPath,
+        display_name: displayName,
+        role: displayName === "我" ? "self" : "contact",
+        hf_token: hfTokenInput.value.trim(),
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "声纹登记失败");
+    const profile = data.result?.profile || {};
+    speakerProfileMeta.textContent = `已登记：${profile.display_name || profile.id} · ${profile.embedding_dimensions || 0} 维 · ${data.result?.path || ""}`;
+    resultText.textContent = `声纹登记完成：${profile.display_name || profile.id}\n保存位置：${data.result?.path || ""}`;
+    setStatus("声纹已登记", "ok");
+  } catch (error) {
+    setStatus("声纹登记失败", "error");
+    resultText.textContent = `声纹登记失败：${error.message}`;
+  } finally {
+    setAsrBusy(false);
+    refreshSpeakerProfiles();
+  }
+}
+
+async function runDiarizedAsr() {
+  const localPath = currentLocalMediaPath();
+  if (!localPath) {
+    setStatus("缺少路径", "warn");
+    resultText.textContent = "先填入本地视频/音频路径。长期 ASR 会直接从磁盘读取大文件。";
+    localAsrPathInput.focus();
+    return;
+  }
+  cacheSettings();
+  setAsrBusy(true);
+  setStatus("说话人分离中", "warn");
+  resultText.textContent = [
+    "正在跑长期 ASR：pyannote 先分离说话人，Whisper 再转写并按时间对齐。",
+    "如果是首次使用，pyannote/Whisper 可能会下载模型权重，长视频会等待较久。",
+  ].join("\n");
+  try {
+    const response = await fetch("/api/multimodal/diarized-asr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        local_path: localPath,
+        local_model: localAsrModelInput.value,
+        compute_type: localAsrComputeInput.value,
+        language: localAsrLanguageInput.value || "zh",
+        hf_token: hfTokenInput.value.trim(),
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "说话人分离 ASR 失败");
+    const text = data.result?.text || "";
+    appendTranscriptToTimeline("说话人分离 ASR", text);
+    const speakers = data.result?.speakers || [];
+    transcriptMeta.textContent = `说话人分离 ASR 完成 · ${speakers.length} 个说话人 · ${transcriptText.length} 字`;
+    resultText.textContent = [
+      "说话人：",
+      speakerSummaryText(speakers),
+      "",
+      transcriptText || "ASR 完成，但没有识别到文字。",
+      data.result?.saved_path ? `\n保存位置：${data.result.saved_path}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    setStatus("分离 ASR 完成", "ok");
+  } catch (error) {
+    setStatus("分离 ASR 失败", "error");
+    resultText.textContent = `说话人分离 ASR 失败：${error.message}`;
+  } finally {
+    setAsrBusy(false);
+    refreshSpeakerProfiles();
   }
 }
 
@@ -854,13 +1009,20 @@ localAsrPathInput.addEventListener("change", cacheSettings);
 localAsrPathInput.addEventListener("blur", cacheSettings);
 localAsrModelInput.addEventListener("change", cacheSettings);
 localAsrModelInput.addEventListener("blur", cacheSettings);
+hfTokenInput.addEventListener("change", cacheSettings);
+hfTokenInput.addEventListener("blur", cacheSettings);
+speakerDisplayNameInput.addEventListener("change", cacheSettings);
+speakerDisplayNameInput.addEventListener("blur", cacheSettings);
 mediaFileInput.addEventListener("change", onFileSelected);
 transcriptFileInput.addEventListener("change", onTranscriptSelected);
 extractButton.addEventListener("click", extractFrames);
 localAsrButton.addEventListener("click", runLocalWhisperAsr);
+enrollSpeakerButton.addEventListener("click", enrollCurrentSpeaker);
+diarizedAsrButton.addEventListener("click", runDiarizedAsr);
 analyzeButton.addEventListener("click", analyzeMaterial);
 clearButton.addEventListener("click", clearAll);
 confirmSelectedButton.addEventListener("click", confirmSelectedCandidates);
 
 restoreSettings();
+refreshSpeakerProfiles();
 renderFrames();

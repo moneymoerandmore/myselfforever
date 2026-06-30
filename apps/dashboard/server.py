@@ -9,6 +9,7 @@ import csv
 from datetime import date
 import importlib.util
 import json
+import math
 import mimetypes
 import os
 import re
@@ -27,9 +28,12 @@ SELF_CORE_PATH = ROOT / "runtime" / "self-core" / "SelfCore.v0.1.md"
 DYADIC_PROFILES_PATH = ROOT / "runtime" / "dyadic-profiles" / "profiles.json"
 MULTIMODAL_INTAKE_DIR = ROOT / "data" / "generated" / "multimodal-intake"
 MULTIMODAL_ASR_DIR = ROOT / "data" / "generated" / "multimodal-asr"
+MULTIMODAL_DIARIZED_ASR_DIR = ROOT / "data" / "generated" / "multimodal-diarized-asr"
 MULTIMODAL_CONFIRM_DIR = ROOT / "data" / "generated" / "multimodal-confirmations"
 MULTIMODAL_MEMORY_DIR = ROOT / "runtime" / "multimodal-memory"
 MULTIMODAL_MEMORY_PATH = MULTIMODAL_MEMORY_DIR / "confirmed-features.jsonl"
+SPEAKER_PROFILE_DIR = ROOT / "runtime" / "speaker-profiles"
+SPEAKER_PROFILE_PATH = SPEAKER_PROFILE_DIR / "profiles.json"
 SELFCORE_MERGE_DIR = ROOT / "data" / "generated" / "selfcore-candidate-merges"
 SELFCORE_INJECTION_DIR = ROOT / "data" / "generated" / "selfcore-injections"
 SELFCORE_INJECTION_LOG_PATH = ROOT / "runtime" / "self-core" / "candidate-injections.jsonl"
@@ -37,6 +41,8 @@ MAX_MULTIMODAL_FILES = 36
 MAX_IMAGE_DATA_URL_CHARS = 900_000
 MAX_TOTAL_DATA_URL_CHARS = 8_000_000
 local_whisper_models: dict[tuple[str, str, str], Any] = {}
+pyannote_pipelines: dict[str, Any] = {}
+pyannote_embedding_inferences: dict[str, Any] = {}
 TOPIC_LABELS = {
     "ai_technology": "AI与技术",
     "work_organization": "工作与组织",
@@ -680,6 +686,328 @@ def call_local_whisper_asr(payload: dict[str, Any]) -> dict[str, Any]:
         "compute_type": compute_type,
         "language": record["language"],
         "duration": record["duration"],
+    }
+
+
+def module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def pyannote_dependency_status() -> dict[str, Any]:
+    available = module_available("pyannote") and module_available("pyannote.audio")
+    return {
+        "available": available,
+        "package": "pyannote.audio",
+        "install_hint": "pip install pyannote.audio soundfile",
+    }
+
+
+def speaker_profiles_payload() -> dict[str, Any]:
+    if not SPEAKER_PROFILE_PATH.exists():
+        return {"version": 1, "profiles": []}
+    try:
+        payload = json.loads(SPEAKER_PROFILE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"version": 1, "profiles": []}
+    if not isinstance(payload, dict):
+        return {"version": 1, "profiles": []}
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, list):
+        payload["profiles"] = []
+    payload.setdefault("version", 1)
+    return payload
+
+
+def save_speaker_profiles_payload(payload: dict[str, Any]) -> None:
+    SPEAKER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    SPEAKER_PROFILE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def public_speaker_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": profile.get("id"),
+        "display_name": profile.get("display_name"),
+        "role": profile.get("role"),
+        "source_path": profile.get("source_path"),
+        "created_at": profile.get("created_at"),
+        "updated_at": profile.get("updated_at"),
+        "embedding_dimensions": len(profile.get("embedding") or []),
+    }
+
+
+def list_speaker_profiles() -> dict[str, Any]:
+    payload = speaker_profiles_payload()
+    return {
+        "dependency": pyannote_dependency_status(),
+        "profiles": [public_speaker_profile(profile) for profile in payload.get("profiles", [])],
+        "path": str(SPEAKER_PROFILE_PATH),
+    }
+
+
+def hf_token_from_payload(payload: dict[str, Any]) -> str:
+    return (
+        str(payload.get("hf_token") or "").strip()
+        or os.environ.get("HUGGINGFACE_TOKEN", "").strip()
+        or os.environ.get("HF_TOKEN", "").strip()
+    )
+
+
+def require_pyannote(token: str) -> None:
+    status = pyannote_dependency_status()
+    if not status["available"]:
+        raise ValueError("长期说话人分离需要安装 pyannote.audio；请先运行 pip install pyannote.audio soundfile。")
+    if not token:
+        raise ValueError("长期说话人分离需要 HuggingFace token，并且要在 HuggingFace 接受 pyannote 模型授权。")
+
+
+def get_pyannote_pipeline(token: str) -> Any:
+    key = token[-12:] if token else "env"
+    pipeline = pyannote_pipelines.get(key)
+    if pipeline is not None:
+        return pipeline
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError as exc:
+        raise ValueError("pyannote.audio 未安装，无法做长期说话人分离。") from exc
+
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+    pyannote_pipelines[key] = pipeline
+    return pipeline
+
+
+def get_pyannote_embedding_inference(token: str) -> Any:
+    key = token[-12:] if token else "env"
+    inference = pyannote_embedding_inferences.get(key)
+    if inference is not None:
+        return inference
+    try:
+        from pyannote.audio import Inference, Model
+    except ImportError as exc:
+        raise ValueError("pyannote.audio 未安装，无法建立声纹身份库。") from exc
+
+    model = Model.from_pretrained("pyannote/embedding", use_auth_token=token)
+    inference = Inference(model, window="whole")
+    pyannote_embedding_inferences[key] = inference
+    return inference
+
+
+def normalize_embedding(value: Any) -> list[float]:
+    try:
+        import numpy as np
+
+        array = np.asarray(value, dtype=float)
+        if array.ndim > 1:
+            array = array.mean(axis=0)
+        vector = [float(item) for item in array.reshape(-1)]
+    except Exception:
+        vector = [float(item) for item in (value or [])]
+    norm = math.sqrt(sum(item * item for item in vector))
+    if norm <= 0:
+        return vector
+    return [item / norm for item in vector]
+
+
+def audio_embedding(source_path: Path, token: str, start: float | None = None, end: float | None = None) -> list[float]:
+    inference = get_pyannote_embedding_inference(token)
+    if start is None or end is None:
+        return normalize_embedding(inference(str(source_path)))
+    try:
+        from pyannote.core import Segment
+
+        segment = Segment(float(start), float(end))
+        return normalize_embedding(inference.crop({"audio": str(source_path)}, segment))
+    except Exception:
+        return normalize_embedding(inference(str(source_path)))
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    size = min(len(left), len(right))
+    return sum(left[index] * right[index] for index in range(size))
+
+
+def best_speaker_identity(embedding: list[float], profiles: list[dict[str, Any]], threshold: float = 0.72) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_score = 0.0
+    for profile in profiles:
+        score = cosine_similarity(embedding, [float(item) for item in profile.get("embedding") or []])
+        if score > best_score:
+            best = profile
+            best_score = score
+    if best is None or best_score < threshold:
+        return None
+    return {
+        "id": best.get("id"),
+        "display_name": best.get("display_name"),
+        "role": best.get("role"),
+        "score": round(best_score, 4),
+    }
+
+
+def speaker_slug(value: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z_-]+", "-", value.strip()).strip("-").lower()
+    return slug or f"speaker-{uuid4().hex[:8]}"
+
+
+def enroll_speaker_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    token = hf_token_from_payload(payload)
+    require_pyannote(token)
+    display_name = str(payload.get("display_name") or "我").strip() or "我"
+    role = str(payload.get("role") or ("self" if display_name == "我" else "contact")).strip() or "contact"
+    profile_id = speaker_slug(str(payload.get("id") or display_name))
+    embedding = audio_embedding(source_path, token)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    payload_data = speaker_profiles_payload()
+    profiles = [profile for profile in payload_data.get("profiles", []) if profile.get("id") != profile_id]
+    existing = next((profile for profile in payload_data.get("profiles", []) if profile.get("id") == profile_id), {})
+    profile = {
+        "id": profile_id,
+        "display_name": display_name,
+        "role": role,
+        "embedding": embedding,
+        "source_path": str(source_path),
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+    }
+    profiles.append(profile)
+    payload_data["profiles"] = sorted(profiles, key=lambda item: str(item.get("display_name") or item.get("id") or ""))
+    save_speaker_profiles_payload(payload_data)
+    return {
+        "profile": public_speaker_profile(profile),
+        "profile_count": len(payload_data["profiles"]),
+        "path": str(SPEAKER_PROFILE_PATH),
+    }
+
+
+def diarization_turns(source_path: Path, token: str) -> list[dict[str, Any]]:
+    pipeline = get_pyannote_pipeline(token)
+    diarization = pipeline(str(source_path))
+    turns: list[dict[str, Any]] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        turns.append(
+            {
+                "start": round(float(turn.start), 2),
+                "end": round(float(turn.end), 2),
+                "speaker": str(speaker),
+            }
+        )
+    return turns
+
+
+def interval_overlap(left_start: float, left_end: float, right_start: float, right_end: float) -> float:
+    return max(0.0, min(left_end, right_end) - max(left_start, right_start))
+
+
+def speaker_for_interval(start: float, end: float, turns: list[dict[str, Any]]) -> str:
+    best_speaker = "UNKNOWN"
+    best_overlap = 0.0
+    midpoint = (start + end) / 2
+    for turn in turns:
+        overlap = interval_overlap(start, end, float(turn["start"]), float(turn["end"]))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = str(turn["speaker"])
+    if best_overlap > 0:
+        return best_speaker
+    for turn in turns:
+        if float(turn["start"]) <= midpoint <= float(turn["end"]):
+            return str(turn["speaker"])
+    return best_speaker
+
+
+def summarize_diarized_speakers(source_path: Path, token: str, turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    profile_payload = speaker_profiles_payload()
+    profiles = profile_payload.get("profiles", [])
+    speakers = sorted({str(turn["speaker"]) for turn in turns})
+    summary: list[dict[str, Any]] = []
+    speaker_name_map: dict[str, str] = {}
+    for speaker in speakers:
+        speaker_turns = [turn for turn in turns if turn["speaker"] == speaker]
+        duration = sum(max(0.0, float(turn["end"]) - float(turn["start"])) for turn in speaker_turns)
+        longest = max(speaker_turns, key=lambda turn: float(turn["end"]) - float(turn["start"]))
+        embedding = audio_embedding(source_path, token, float(longest["start"]), float(longest["end"]))
+        identity = best_speaker_identity(embedding, profiles)
+        display_name = identity["display_name"] if identity else speaker
+        speaker_name_map[speaker] = str(display_name)
+        summary.append(
+            {
+                "speaker": speaker,
+                "display_name": display_name,
+                "duration": round(duration, 2),
+                "turn_count": len(speaker_turns),
+                "identity": identity,
+            }
+        )
+    return summary, speaker_name_map
+
+
+def call_diarized_whisper_asr(payload: dict[str, Any]) -> dict[str, Any]:
+    source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    token = hf_token_from_payload(payload)
+    require_pyannote(token)
+    turns = diarization_turns(source_path, token)
+    speaker_summary, speaker_name_map = summarize_diarized_speakers(source_path, token, turns)
+
+    asr_result = call_local_whisper_asr(payload)
+    segments: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for segment in asr_result.get("segments", []):
+        start = float(segment.get("start") or 0)
+        end = float(segment.get("end") or start)
+        raw_speaker = speaker_for_interval(start, end, turns)
+        display_name = speaker_name_map.get(raw_speaker, raw_speaker)
+        text = str(segment.get("text") or "").strip()
+        item = {
+            **segment,
+            "speaker": display_name,
+            "raw_speaker": raw_speaker,
+        }
+        segments.append(item)
+        if text:
+            lines.append(f"[{format_timestamp(start)}-{format_timestamp(end)}] {display_name}({raw_speaker}): {text}")
+
+    transcript = "\n".join(lines).strip()
+    MULTIMODAL_DIARIZED_ASR_DIR.mkdir(parents=True, exist_ok=True)
+    record_id = f"diarized-asr-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    txt_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.txt"
+    json_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.json"
+    txt_path.write_text(transcript, encoding="utf-8")
+    record = {
+        "id": record_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "source_path": str(source_path),
+        "source_size": source_path.stat().st_size,
+        "model": asr_result.get("model"),
+        "device": asr_result.get("device"),
+        "compute_type": asr_result.get("compute_type"),
+        "language": asr_result.get("language"),
+        "duration": asr_result.get("duration"),
+        "diarization_turns": turns,
+        "speakers": speaker_summary,
+        "segments": segments,
+        "transcript_path": str(txt_path),
+        "plain_asr_record_path": asr_result.get("record_path"),
+    }
+    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "text": transcript,
+        "segments": segments,
+        "speakers": speaker_summary,
+        "diarization_turns": turns,
+        "saved_path": str(txt_path),
+        "record_path": str(json_path),
+        "plain_asr_record_path": asr_result.get("record_path"),
+        "model": asr_result.get("model"),
+        "device": asr_result.get("device"),
+        "compute_type": asr_result.get("compute_type"),
+        "language": asr_result.get("language"),
+        "duration": asr_result.get("duration"),
     }
 
 
@@ -1746,6 +2074,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path == "/api/selfcore-candidates":
             self.send_json({"ok": True, "result": list_selfcore_candidates()})
             return
+        if self.path == "/api/speaker-profiles":
+            self.send_json({"ok": True, "result": list_speaker_profiles()})
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -1753,7 +2084,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/draft",
             "/api/multimodal/intake",
             "/api/multimodal/local-asr",
+            "/api/multimodal/diarized-asr",
             "/api/multimodal/confirm",
+            "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
         }:
@@ -1767,8 +2100,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = generate_draft(payload)
             elif self.path == "/api/multimodal/local-asr":
                 result = call_local_whisper_asr(payload)
+            elif self.path == "/api/multimodal/diarized-asr":
+                result = call_diarized_whisper_asr(payload)
             elif self.path == "/api/multimodal/confirm":
                 result = confirm_multimodal_candidates(payload)
+            elif self.path == "/api/speaker-profiles/enroll":
+                result = enroll_speaker_profile(payload)
             elif self.path == "/api/selfcore-candidates/merge":
                 result = merge_selfcore_candidates(payload)
             elif self.path == "/api/selfcore-candidates/inject":

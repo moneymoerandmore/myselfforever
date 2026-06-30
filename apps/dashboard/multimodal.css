@@ -217,6 +217,10 @@ textarea:focus {
   gap: 10px;
 }
 
+.compact-actions {
+  margin-top: -2px;
+}
+
 button {
   height: 40px;
   border: 1px solid var(--accent);
