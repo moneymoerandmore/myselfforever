@@ -156,6 +156,11 @@ textarea {
   gap: 12px;
 }
 
+.asr-provider-panel {
+  display: grid;
+  gap: 12px;
+}
+
 label {
   display: grid;
   gap: 7px;

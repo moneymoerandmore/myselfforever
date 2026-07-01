@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ MAX_MULTIMODAL_FILES = 36
 MAX_IMAGE_DATA_URL_CHARS = 900_000
 MAX_TOTAL_DATA_URL_CHARS = 8_000_000
 local_whisper_models: dict[tuple[str, str, str], Any] = {}
+funasr_models: dict[tuple[str, str, str, str], Any] = {}
 pyannote_pipelines: dict[str, Any] = {}
 pyannote_embedding_inferences: dict[str, Any] = {}
 asr_jobs: dict[str, dict[str, Any]] = {}
@@ -709,13 +711,20 @@ def pyannote_dependency_status() -> dict[str, Any]:
         "hf_xet": module_available("hf_xet"),
         "soundfile": module_available("soundfile"),
         "omegaconf": module_available("omegaconf"),
+        "funasr": module_available("funasr"),
+        "modelscope": module_available("modelscope"),
     }
-    available = all(dependencies.values())
+    local_pyannote_available = all(
+        dependencies[name]
+        for name in ["pyannote.audio", "faster_whisper", "torch", "hf_xet", "soundfile", "omegaconf"]
+    )
+    funasr_available = dependencies["funasr"] and dependencies["modelscope"]
     return {
-        "available": available,
+        "available": local_pyannote_available,
+        "funasr_available": funasr_available,
         "dependencies": dependencies,
-        "package": "pyannote.audio + faster-whisper",
-        "install_hint": "pip install pyannote.audio faster-whisper soundfile hf_xet omegaconf hydra-core",
+        "package": "pyannote.audio + faster-whisper; FunASR optional",
+        "install_hint": "pip install pyannote.audio faster-whisper soundfile hf_xet omegaconf hydra-core funasr modelscope",
     }
 
 
@@ -1055,6 +1064,461 @@ def call_diarized_whisper_asr(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def volcengine_credentials(payload: dict[str, Any]) -> dict[str, str]:
+    app_id = str(payload.get("volcengine_app_id") or os.environ.get("VOLCENGINE_ASR_APP_ID", "")).strip()
+    token = str(payload.get("volcengine_token") or os.environ.get("VOLCENGINE_ASR_TOKEN", "")).strip()
+    cluster = str(
+        payload.get("volcengine_cluster")
+        or os.environ.get("VOLCENGINE_ASR_CLUSTER", "volcengine_input_common")
+    ).strip()
+    audio_url = str(payload.get("volcengine_audio_url") or "").strip()
+    if not app_id:
+        raise ValueError("火山引擎 ASR 需要 AppID。")
+    if not token:
+        raise ValueError("火山引擎 ASR 需要 Access Token。")
+    if not cluster:
+        raise ValueError("火山引擎 ASR 需要 Cluster。")
+    if not audio_url:
+        raise ValueError("火山引擎 ASR 需要可访问的音视频 URL；本地 C:\\tmp 路径不能直接提交给云端服务。")
+    return {
+        "app_id": app_id,
+        "token": token,
+        "cluster": cluster,
+        "audio_url": audio_url,
+    }
+
+
+def volcengine_post_json(url: str, payload: dict[str, Any], token: str) -> dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(f"火山引擎 ASR HTTP {exc.code}: {raw[:1000]}") from exc
+    except error.URLError as exc:
+        raise ValueError(f"火山引擎 ASR 请求失败：{exc.reason}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"火山引擎 ASR 返回了非 JSON：{raw[:1000]}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("火山引擎 ASR 返回结构不是对象。")
+    return parsed
+
+
+def first_nested_value(value: Any, keys: set[str]) -> Any:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in keys:
+                return item
+        for item in value.values():
+            found = first_nested_value(item, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = first_nested_value(item, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def numeric_time_seconds(value: Any) -> float:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if number > 10_000:
+        return number / 1000.0
+    return number
+
+
+def normalize_volcengine_segment(raw: dict[str, Any], fallback_index: int) -> dict[str, Any]:
+    text = str(
+        raw.get("text")
+        or raw.get("utterance")
+        or raw.get("sentence")
+        or raw.get("result")
+        or ""
+    ).strip()
+    start = numeric_time_seconds(
+        raw.get("start")
+        or raw.get("start_time")
+        or raw.get("startTime")
+        or raw.get("begin_time")
+        or raw.get("beginTime")
+    )
+    end = numeric_time_seconds(
+        raw.get("end")
+        or raw.get("end_time")
+        or raw.get("endTime")
+        or raw.get("stop_time")
+        or raw.get("stopTime")
+    )
+    speaker = str(
+        raw.get("speaker")
+        or raw.get("speaker_id")
+        or raw.get("speakerId")
+        or raw.get("speaker_label")
+        or raw.get("channel")
+        or f"SPEAKER_{fallback_index:02d}"
+    )
+    return {
+        "start": round(start, 2),
+        "end": round(end, 2),
+        "text": text,
+        "speaker": speaker,
+        "raw_speaker": speaker,
+    }
+
+
+def normalize_volcengine_result(raw: dict[str, Any], source_url: str, reqid: str) -> dict[str, Any]:
+    segment_candidates = first_nested_value(raw, {"utterances", "segments", "sentences"})
+    segments: list[dict[str, Any]] = []
+    if isinstance(segment_candidates, list):
+        for index, item in enumerate(segment_candidates):
+            if isinstance(item, dict):
+                segment = normalize_volcengine_segment(item, index)
+                if segment["text"]:
+                    segments.append(segment)
+    if not segments:
+        text_value = first_nested_value(raw, {"text", "transcript", "result_text"})
+        text = str(text_value or "").strip()
+        if text:
+            segments.append({"start": 0.0, "end": 0.0, "text": text, "speaker": "SPEAKER_00", "raw_speaker": "SPEAKER_00"})
+
+    speakers: list[dict[str, Any]] = []
+    for speaker in sorted({segment["speaker"] for segment in segments}):
+        speaker_segments = [segment for segment in segments if segment["speaker"] == speaker]
+        duration = sum(max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0)) for segment in speaker_segments)
+        speakers.append(
+            {
+                "speaker": speaker,
+                "display_name": speaker,
+                "duration": round(duration, 2),
+                "turn_count": len(speaker_segments),
+                "identity": None,
+            }
+        )
+
+    lines = []
+    for segment in segments:
+        lines.append(
+            f"[{format_timestamp(float(segment['start']))}-{format_timestamp(float(segment['end']))}] "
+            f"{segment['speaker']}({segment['raw_speaker']}): {segment['text']}"
+        )
+    transcript = "\n".join(lines).strip()
+
+    MULTIMODAL_DIARIZED_ASR_DIR.mkdir(parents=True, exist_ok=True)
+    record_id = f"volcengine-asr-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    txt_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.txt"
+    json_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.json"
+    txt_path.write_text(transcript, encoding="utf-8")
+    record = {
+        "id": record_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": "volcengine",
+        "source_url": source_url,
+        "reqid": reqid,
+        "speakers": speakers,
+        "segments": segments,
+        "transcript_path": str(txt_path),
+        "raw_result": raw,
+    }
+    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "text": transcript,
+        "segments": segments,
+        "speakers": speakers,
+        "diarization_turns": [
+            {"start": segment["start"], "end": segment["end"], "speaker": segment["raw_speaker"]}
+            for segment in segments
+        ],
+        "saved_path": str(txt_path),
+        "record_path": str(json_path),
+        "provider": "volcengine",
+        "reqid": reqid,
+    }
+
+
+def volcengine_status(raw: dict[str, Any]) -> str:
+    status_value = str(first_nested_value(raw, {"status", "status_text", "state"}) or "").lower()
+    code_value = first_nested_value(raw, {"code", "err_code", "error_code"})
+    if status_value in {"success", "succeeded", "done", "completed", "finished"}:
+        return "completed"
+    if status_value in {"failed", "error", "failure"}:
+        return "failed"
+    if isinstance(code_value, int) and code_value not in {0, 1000, 20000000}:
+        return "failed"
+    if first_nested_value(raw, {"utterances", "segments", "sentences", "text", "transcript", "result_text"}) is not None:
+        return "completed"
+    return "running"
+
+
+def call_volcengine_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
+    credentials = volcengine_credentials(payload)
+    submit_url = str(
+        payload.get("volcengine_submit_url")
+        or os.environ.get("VOLCENGINE_ASR_SUBMIT_URL", "https://openspeech.bytedance.com/api/v1/auc/submit")
+    ).strip()
+    query_url = str(
+        payload.get("volcengine_query_url")
+        or os.environ.get("VOLCENGINE_ASR_QUERY_URL", "https://openspeech.bytedance.com/api/v1/auc/query")
+    ).strip()
+    reqid = f"dtwin-{uuid4().hex}"
+    common_payload = {
+        "app": {
+            "appid": credentials["app_id"],
+            "token": credentials["token"],
+            "cluster": credentials["cluster"],
+        },
+        "user": {"uid": "digital-twin-local"},
+        "audio": {"url": credentials["audio_url"]},
+        "request": {
+            "reqid": reqid,
+            "nbest": 1,
+            "show_utterances": True,
+            "enable_speaker_info": True,
+            "show_speaker_info": True,
+            "diarization": True,
+        },
+    }
+    submit_result = volcengine_post_json(submit_url, common_payload, credentials["token"])
+    submit_status = volcengine_status(submit_result)
+    if submit_status == "failed":
+        raise ValueError(f"火山引擎 ASR 提交失败：{json.dumps(submit_result, ensure_ascii=False)[:1000]}")
+    if submit_status == "completed":
+        return normalize_volcengine_result(submit_result, credentials["audio_url"], reqid)
+
+    deadline = time.time() + int(payload.get("volcengine_timeout_seconds") or 6 * 60 * 60)
+    query_payload = {
+        "app": common_payload["app"],
+        "user": common_payload["user"],
+        "request": {"reqid": reqid},
+    }
+    last_result = submit_result
+    while time.time() < deadline:
+        time.sleep(int(payload.get("volcengine_poll_interval_seconds") or 5))
+        query_result = volcengine_post_json(query_url, query_payload, credentials["token"])
+        last_result = query_result
+        status = volcengine_status(query_result)
+        if status == "completed":
+            return normalize_volcengine_result(query_result, credentials["audio_url"], reqid)
+        if status == "failed":
+            raise ValueError(f"火山引擎 ASR 任务失败：{json.dumps(query_result, ensure_ascii=False)[:1000]}")
+    raise ValueError(f"火山引擎 ASR 超时，最后返回：{json.dumps(last_result, ensure_ascii=False)[:1000]}")
+
+
+def funasr_config(payload: dict[str, Any]) -> dict[str, Any]:
+    model = str(payload.get("funasr_model") or os.environ.get("FUNASR_MODEL", "paraformer-zh")).strip()
+    vad_model = str(payload.get("funasr_vad_model") or os.environ.get("FUNASR_VAD_MODEL", "fsmn-vad")).strip()
+    punc_model = str(payload.get("funasr_punc_model") or os.environ.get("FUNASR_PUNC_MODEL", "ct-punc")).strip()
+    spk_model = str(payload.get("funasr_spk_model") or os.environ.get("FUNASR_SPK_MODEL", "cam++")).strip()
+    batch_size_s = int(payload.get("funasr_batch_size_s") or os.environ.get("FUNASR_BATCH_SIZE_S", "300"))
+    return {
+        "model": model,
+        "vad_model": vad_model,
+        "punc_model": punc_model,
+        "spk_model": spk_model,
+        "batch_size_s": max(1, batch_size_s),
+        "hotword": str(payload.get("funasr_hotword") or "").strip(),
+    }
+
+
+def get_funasr_model(config: dict[str, Any]) -> Any:
+    try:
+        from funasr import AutoModel
+    except ImportError as exc:
+        raise ValueError("FunASR 未安装；请先运行 pip install funasr modelscope。") from exc
+
+    key = (
+        str(config["model"]),
+        str(config["vad_model"]),
+        str(config["punc_model"]),
+        str(config["spk_model"]),
+    )
+    model = funasr_models.get(key)
+    if model is not None:
+        return model
+
+    kwargs: dict[str, Any] = {"model": config["model"]}
+    if config["vad_model"]:
+        kwargs["vad_model"] = config["vad_model"]
+    if config["punc_model"]:
+        kwargs["punc_model"] = config["punc_model"]
+    if config["spk_model"]:
+        kwargs["spk_model"] = config["spk_model"]
+    model = AutoModel(**kwargs)
+    funasr_models[key] = model
+    return model
+
+
+def normalize_funasr_speaker(value: Any, fallback_index: int) -> str:
+    if value is None or value == "":
+        return f"SPEAKER_{fallback_index:02d}"
+    if isinstance(value, int):
+        return f"SPEAKER_{value:02d}"
+    text = str(value).strip()
+    if text.isdigit():
+        return f"SPEAKER_{int(text):02d}"
+    return text
+
+
+def normalize_funasr_segment(raw: dict[str, Any], fallback_index: int) -> dict[str, Any]:
+    text = str(raw.get("text") or raw.get("sentence") or raw.get("onebest") or "").strip()
+    timestamp = raw.get("timestamp") or raw.get("time_stamp")
+    start = numeric_time_seconds(raw.get("start") or raw.get("begin") or raw.get("start_time"))
+    end = numeric_time_seconds(raw.get("end") or raw.get("stop") or raw.get("end_time"))
+    if isinstance(timestamp, list) and timestamp:
+        first = timestamp[0]
+        last = timestamp[-1]
+        if isinstance(first, list) and first:
+            start = numeric_time_seconds(first[0])
+        if isinstance(last, list) and len(last) > 1:
+            end = numeric_time_seconds(last[1])
+    speaker = normalize_funasr_speaker(
+        raw.get("spk") or raw.get("speaker") or raw.get("speaker_id"),
+        fallback_index,
+    )
+    return {
+        "start": round(start, 2),
+        "end": round(end, 2),
+        "text": text,
+        "speaker": speaker,
+        "raw_speaker": speaker,
+    }
+
+
+def funasr_result_items(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    segments: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for item in funasr_result_items(raw):
+        sentence_info = item.get("sentence_info") or item.get("sentences") or item.get("segments")
+        if isinstance(sentence_info, list):
+            for sentence in sentence_info:
+                if isinstance(sentence, dict):
+                    segment = normalize_funasr_segment(sentence, len(segments))
+                    if segment["text"]:
+                        segments.append(segment)
+        text = str(item.get("text") or "").strip()
+        if text:
+            text_parts.append(text)
+
+    if not segments and text_parts:
+        segments.append(
+            {
+                "start": 0.0,
+                "end": 0.0,
+                "text": "\n".join(text_parts),
+                "speaker": "SPEAKER_00",
+                "raw_speaker": "SPEAKER_00",
+            }
+        )
+
+    speakers: list[dict[str, Any]] = []
+    for speaker in sorted({segment["speaker"] for segment in segments}):
+        speaker_segments = [segment for segment in segments if segment["speaker"] == speaker]
+        duration = sum(max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0)) for segment in speaker_segments)
+        speakers.append(
+            {
+                "speaker": speaker,
+                "display_name": speaker,
+                "duration": round(duration, 2),
+                "turn_count": len(speaker_segments),
+                "identity": None,
+            }
+        )
+
+    lines = [
+        f"[{format_timestamp(float(segment['start']))}-{format_timestamp(float(segment['end']))}] "
+        f"{segment['speaker']}({segment['raw_speaker']}): {segment['text']}"
+        for segment in segments
+        if segment.get("text")
+    ]
+    transcript = "\n".join(lines).strip()
+
+    MULTIMODAL_DIARIZED_ASR_DIR.mkdir(parents=True, exist_ok=True)
+    record_id = f"funasr-asr-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    txt_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.txt"
+    json_path = MULTIMODAL_DIARIZED_ASR_DIR / f"{record_id}.json"
+    txt_path.write_text(transcript, encoding="utf-8")
+    record = {
+        "id": record_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": "funasr",
+        "source_path": str(source_path),
+        "source_size": source_path.stat().st_size,
+        "model": config["model"],
+        "vad_model": config["vad_model"],
+        "punc_model": config["punc_model"],
+        "spk_model": config["spk_model"],
+        "speakers": speakers,
+        "segments": segments,
+        "transcript_path": str(txt_path),
+        "raw_result": raw,
+    }
+    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "text": transcript,
+        "segments": segments,
+        "speakers": speakers,
+        "diarization_turns": [
+            {"start": segment["start"], "end": segment["end"], "speaker": segment["raw_speaker"]}
+            for segment in segments
+        ],
+        "saved_path": str(txt_path),
+        "record_path": str(json_path),
+        "provider": "funasr",
+        "model": config["model"],
+        "vad_model": config["vad_model"],
+        "punc_model": config["punc_model"],
+        "spk_model": config["spk_model"],
+    }
+
+
+def call_funasr_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
+    source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    config = funasr_config(payload)
+    model = get_funasr_model(config)
+    generate_kwargs: dict[str, Any] = {
+        "input": str(source_path),
+        "batch_size_s": config["batch_size_s"],
+        "merge_vad": True,
+        "merge_length_s": int(payload.get("funasr_merge_length_s") or 15),
+    }
+    if config["hotword"]:
+        generate_kwargs["hotword"] = config["hotword"]
+    raw_result = model.generate(**generate_kwargs)
+    return normalize_funasr_result(raw_result, source_path, config)
+
+
+def call_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
+    provider = str(payload.get("asr_provider") or os.environ.get("DIGITAL_TWIN_ASR_PROVIDER", "local")).strip().lower()
+    if provider in {"volcengine", "volcano", "bytedance"}:
+        return call_volcengine_diarized_asr(payload)
+    if provider in {"funasr", "local_funasr"}:
+        return call_funasr_diarized_asr(payload)
+    return call_diarized_whisper_asr(payload)
+
+
 def public_asr_job(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": job.get("id"),
@@ -1080,7 +1544,7 @@ def update_asr_job(job_id: str, **updates: Any) -> None:
 def run_diarized_asr_job(job_id: str, payload: dict[str, Any]) -> None:
     try:
         update_asr_job(job_id, status="running", stage="说话人分离与 ASR 处理中")
-        result = call_diarized_whisper_asr(payload)
+        result = call_diarized_asr(payload)
     except Exception as exc:
         update_asr_job(job_id, status="failed", stage="失败", error=str(exc))
         return
@@ -1088,7 +1552,10 @@ def run_diarized_asr_job(job_id: str, payload: dict[str, Any]) -> None:
 
 
 def start_diarized_asr_job(payload: dict[str, Any]) -> dict[str, Any]:
-    source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    provider = str(payload.get("asr_provider") or os.environ.get("DIGITAL_TWIN_ASR_PROVIDER", "local")).strip().lower()
+    source_label = str(payload.get("volcengine_audio_url") or "") if provider in {"volcengine", "volcano", "bytedance"} else ""
+    if not source_label:
+        source_label = str(resolve_local_media_path(str(payload.get("local_path") or "")))
     job_id = f"diarized-asr-job-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     now = datetime.now().isoformat(timespec="seconds")
     job = {
@@ -1097,7 +1564,7 @@ def start_diarized_asr_job(payload: dict[str, Any]) -> dict[str, Any]:
         "stage": "排队中",
         "created_at": now,
         "updated_at": now,
-        "source_path": str(source_path),
+        "source_path": source_label,
         "result": None,
         "error": None,
     }
@@ -2213,7 +2680,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/multimodal/local-asr":
                 result = call_local_whisper_asr(payload)
             elif self.path == "/api/multimodal/diarized-asr":
-                result = call_diarized_whisper_asr(payload)
+                result = call_diarized_asr(payload)
             elif self.path == "/api/multimodal/diarized-asr-job":
                 result = start_diarized_asr_job(payload)
             elif self.path == "/api/multimodal/confirm":

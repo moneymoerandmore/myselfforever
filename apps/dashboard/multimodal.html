@@ -59,49 +59,121 @@
           </label>
           <p class="field-note" id="transcriptMeta">可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原</p>
 
-          <div class="grid">
-            <label>
-              <span>本地 Whisper</span>
-              <select id="localAsrModel">
-                <option value="tiny" selected>tiny（最快）</option>
-                <option value="base">base（快）</option>
-                <option value="small">small（更准）</option>
-                <option value="medium">medium（慢）</option>
-              </select>
-            </label>
-            <label>
-              <span>计算精度</span>
-              <select id="localAsrCompute">
-                <option value="int8" selected>CPU int8</option>
-                <option value="float32">CPU float32</option>
-              </select>
-            </label>
-          </div>
           <label>
-            <span>本地识别语言</span>
-            <select id="localAsrLanguage">
-              <option value="zh" selected>中文</option>
-              <option value="en">English</option>
-              <option value="">自动</option>
+            <span>ASR 服务</span>
+            <select id="asrProvider">
+              <option value="volcengine" selected>火山引擎</option>
+              <option value="funasr">FunASR 本地</option>
+              <option value="local">本地 pyannote + Whisper</option>
             </select>
           </label>
-          <button type="button" class="ghost" id="localAsrButton">本地 Whisper 转写</button>
 
-          <div class="grid">
-            <label>
-              <span>HuggingFace Token</span>
-              <input id="hfToken" type="password" autocomplete="off" placeholder="pyannote 说话人分离 token" />
-            </label>
-            <label>
-              <span>声纹身份</span>
-              <input id="speakerDisplayName" autocomplete="off" value="我" />
-            </label>
+          <div class="asr-provider-panel" data-asr-panel="volcengine">
+            <div class="grid">
+              <label>
+                <span>火山 AppID</span>
+                <input id="volcengineAppId" autocomplete="off" placeholder="火山语音 AppID" />
+              </label>
+              <label>
+                <span>火山 Access Token</span>
+                <input id="volcengineToken" type="password" autocomplete="off" placeholder="火山语音 Token" />
+              </label>
+            </div>
+            <div class="grid">
+              <label>
+                <span>火山 Cluster</span>
+                <input id="volcengineCluster" autocomplete="off" value="volcengine_input_common" />
+              </label>
+              <label>
+                <span>火山音视频 URL</span>
+                <input id="volcengineAudioUrl" autocomplete="off" placeholder="https://... 可被火山访问的音视频地址" />
+              </label>
+            </div>
+            <p class="field-note">火山模式需要公网/对象存储 URL；本地 C:\tmp 路径只有本地服务能读，云端不能直接访问。</p>
           </div>
+
+          <div class="asr-provider-panel hidden" data-asr-panel="funasr">
+            <div class="grid">
+              <label>
+                <span>FunASR 模型</span>
+                <input id="funasrModel" autocomplete="off" value="paraformer-zh" />
+              </label>
+              <label>
+                <span>FunASR VAD</span>
+                <input id="funasrVadModel" autocomplete="off" value="fsmn-vad" />
+              </label>
+            </div>
+            <div class="grid">
+              <label>
+                <span>FunASR 标点</span>
+                <input id="funasrPuncModel" autocomplete="off" value="ct-punc" />
+              </label>
+              <label>
+                <span>FunASR 说话人</span>
+                <input id="funasrSpkModel" autocomplete="off" value="cam++" />
+              </label>
+            </div>
+            <div class="grid">
+              <label>
+                <span>FunASR 分块秒数</span>
+                <input id="funasrBatchSize" type="number" min="1" step="1" value="300" />
+              </label>
+              <label>
+                <span>FunASR 热词</span>
+                <input id="funasrHotword" autocomplete="off" placeholder="可选：人名、项目名、专业词" />
+              </label>
+            </div>
+            <p class="field-note">FunASR 模式直接读取本地文件，第一次运行会下载并加载 ModelScope 模型，长视频会比较慢。</p>
+          </div>
+
+          <div class="asr-provider-panel hidden" data-asr-panel="local">
+            <div class="grid">
+              <label>
+                <span>本地 Whisper</span>
+                <select id="localAsrModel">
+                  <option value="tiny" selected>tiny（最快）</option>
+                  <option value="base">base（快）</option>
+                  <option value="small">small（更准）</option>
+                  <option value="medium">medium（慢）</option>
+                </select>
+              </label>
+              <label>
+                <span>计算精度</span>
+                <select id="localAsrCompute">
+                  <option value="int8" selected>CPU int8</option>
+                  <option value="float32">CPU float32</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>本地识别语言</span>
+              <select id="localAsrLanguage">
+                <option value="zh" selected>中文</option>
+                <option value="en">English</option>
+                <option value="">自动</option>
+              </select>
+            </label>
+            <button type="button" class="ghost" id="localAsrButton">本地 Whisper 转写</button>
+
+            <div class="grid">
+              <label>
+                <span>HuggingFace Token</span>
+                <input id="hfToken" type="password" autocomplete="off" placeholder="pyannote 说话人分离 token" />
+              </label>
+              <label>
+                <span>声纹身份</span>
+                <input id="speakerDisplayName" autocomplete="off" value="我" />
+              </label>
+            </div>
+            <div class="actions compact-actions">
+              <button type="button" class="ghost" id="enrollSpeakerButton">登记当前音频为声纹</button>
+            </div>
+            <p class="field-note" id="speakerProfileMeta">长期方案：pyannote 分离说话人，声纹库识别“我”和不同联系人，再把转写对齐到 speaker。</p>
+          </div>
+
           <div class="actions compact-actions">
-            <button type="button" class="ghost" id="enrollSpeakerButton">登记当前音频为声纹</button>
             <button type="button" class="primary" id="diarizedAsrButton">说话人分离 ASR</button>
           </div>
-          <p class="field-note" id="speakerProfileMeta">长期方案：pyannote 分离说话人，声纹库识别“我”和不同联系人，再把转写对齐到 speaker。</p>
 
           <div class="grid">
             <label>

@@ -7,6 +7,18 @@ const localAsrPathInput = document.querySelector("#localAsrPath");
 const localAsrModelInput = document.querySelector("#localAsrModel");
 const localAsrComputeInput = document.querySelector("#localAsrCompute");
 const localAsrLanguageInput = document.querySelector("#localAsrLanguage");
+const asrProviderInput = document.querySelector("#asrProvider");
+const volcengineAppIdInput = document.querySelector("#volcengineAppId");
+const volcengineTokenInput = document.querySelector("#volcengineToken");
+const volcengineClusterInput = document.querySelector("#volcengineCluster");
+const volcengineAudioUrlInput = document.querySelector("#volcengineAudioUrl");
+const asrProviderPanels = Array.from(document.querySelectorAll("[data-asr-panel]"));
+const funasrModelInput = document.querySelector("#funasrModel");
+const funasrVadModelInput = document.querySelector("#funasrVadModel");
+const funasrPuncModelInput = document.querySelector("#funasrPuncModel");
+const funasrSpkModelInput = document.querySelector("#funasrSpkModel");
+const funasrBatchSizeInput = document.querySelector("#funasrBatchSize");
+const funasrHotwordInput = document.querySelector("#funasrHotword");
 const hfTokenInput = document.querySelector("#hfToken");
 const speakerDisplayNameInput = document.querySelector("#speakerDisplayName");
 const targetInput = document.querySelector("#target");
@@ -40,6 +52,17 @@ const POE_API_KEY_STORAGE_KEY = "digitalTwin.poeApiKey";
 const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 const LOCAL_ASR_PATH_STORAGE_KEY = "digitalTwin.localAsrPath";
 const LOCAL_ASR_MODEL_STORAGE_KEY = "digitalTwin.localAsrModel";
+const ASR_PROVIDER_STORAGE_KEY = "digitalTwin.asrProvider";
+const VOLCENGINE_APP_ID_STORAGE_KEY = "digitalTwin.volcengineAppId";
+const VOLCENGINE_TOKEN_STORAGE_KEY = "digitalTwin.volcengineToken";
+const VOLCENGINE_CLUSTER_STORAGE_KEY = "digitalTwin.volcengineCluster";
+const VOLCENGINE_AUDIO_URL_STORAGE_KEY = "digitalTwin.volcengineAudioUrl";
+const FUNASR_MODEL_STORAGE_KEY = "digitalTwin.funasrModel";
+const FUNASR_VAD_MODEL_STORAGE_KEY = "digitalTwin.funasrVadModel";
+const FUNASR_PUNC_MODEL_STORAGE_KEY = "digitalTwin.funasrPuncModel";
+const FUNASR_SPK_MODEL_STORAGE_KEY = "digitalTwin.funasrSpkModel";
+const FUNASR_BATCH_SIZE_STORAGE_KEY = "digitalTwin.funasrBatchSize";
+const FUNASR_HOTWORD_STORAGE_KEY = "digitalTwin.funasrHotword";
 const HF_TOKEN_STORAGE_KEY = "digitalTwin.hfToken";
 const SPEAKER_DISPLAY_NAME_STORAGE_KEY = "digitalTwin.speakerDisplayName";
 const MULTIMODAL_DEFAULT_MODEL = "GPT-4o";
@@ -54,11 +77,31 @@ let videoMetadata = {};
 let transcriptText = "";
 let lastAnalysisResult = null;
 
+function updateAsrProviderPanels() {
+  const provider = asrProviderInput.value || "volcengine";
+  asrProviderPanels.forEach((panel) => {
+    const active = panel.dataset.asrPanel === provider;
+    panel.classList.toggle("hidden", !active);
+    panel.setAttribute("aria-hidden", active ? "false" : "true");
+  });
+}
+
 function restoreSettings() {
   try {
     poeApiKeyInput.value = localStorage.getItem(POE_API_KEY_STORAGE_KEY) || "";
     localAsrPathInput.value = localStorage.getItem(LOCAL_ASR_PATH_STORAGE_KEY) || "";
     localAsrModelInput.value = localStorage.getItem(LOCAL_ASR_MODEL_STORAGE_KEY) || localAsrModelInput.value;
+    asrProviderInput.value = localStorage.getItem(ASR_PROVIDER_STORAGE_KEY) || asrProviderInput.value;
+    volcengineAppIdInput.value = localStorage.getItem(VOLCENGINE_APP_ID_STORAGE_KEY) || "";
+    volcengineTokenInput.value = localStorage.getItem(VOLCENGINE_TOKEN_STORAGE_KEY) || "";
+    volcengineClusterInput.value = localStorage.getItem(VOLCENGINE_CLUSTER_STORAGE_KEY) || volcengineClusterInput.value;
+    volcengineAudioUrlInput.value = localStorage.getItem(VOLCENGINE_AUDIO_URL_STORAGE_KEY) || "";
+    funasrModelInput.value = localStorage.getItem(FUNASR_MODEL_STORAGE_KEY) || funasrModelInput.value;
+    funasrVadModelInput.value = localStorage.getItem(FUNASR_VAD_MODEL_STORAGE_KEY) || funasrVadModelInput.value;
+    funasrPuncModelInput.value = localStorage.getItem(FUNASR_PUNC_MODEL_STORAGE_KEY) || funasrPuncModelInput.value;
+    funasrSpkModelInput.value = localStorage.getItem(FUNASR_SPK_MODEL_STORAGE_KEY) || funasrSpkModelInput.value;
+    funasrBatchSizeInput.value = localStorage.getItem(FUNASR_BATCH_SIZE_STORAGE_KEY) || funasrBatchSizeInput.value;
+    funasrHotwordInput.value = localStorage.getItem(FUNASR_HOTWORD_STORAGE_KEY) || "";
     hfTokenInput.value = localStorage.getItem(HF_TOKEN_STORAGE_KEY) || "";
     speakerDisplayNameInput.value =
       localStorage.getItem(SPEAKER_DISPLAY_NAME_STORAGE_KEY) || speakerDisplayNameInput.value || "我";
@@ -70,6 +113,7 @@ function restoreSettings() {
   } catch {
     // Local storage can be unavailable in locked-down browser contexts.
   }
+  updateAsrProviderPanels();
 }
 
 function cacheSettings() {
@@ -84,6 +128,32 @@ function cacheSettings() {
     if (localAsrPath) localStorage.setItem(LOCAL_ASR_PATH_STORAGE_KEY, localAsrPath);
     else localStorage.removeItem(LOCAL_ASR_PATH_STORAGE_KEY);
     if (localAsrModel) localStorage.setItem(LOCAL_ASR_MODEL_STORAGE_KEY, localAsrModel);
+    const asrProvider = asrProviderInput.value.trim();
+    const volcengineAppId = volcengineAppIdInput.value.trim();
+    const volcengineToken = volcengineTokenInput.value.trim();
+    const volcengineCluster = volcengineClusterInput.value.trim();
+    const volcengineAudioUrl = volcengineAudioUrlInput.value.trim();
+    const funasrModel = funasrModelInput.value.trim();
+    const funasrVadModel = funasrVadModelInput.value.trim();
+    const funasrPuncModel = funasrPuncModelInput.value.trim();
+    const funasrSpkModel = funasrSpkModelInput.value.trim();
+    const funasrBatchSize = funasrBatchSizeInput.value.trim();
+    const funasrHotword = funasrHotwordInput.value.trim();
+    if (asrProvider) localStorage.setItem(ASR_PROVIDER_STORAGE_KEY, asrProvider);
+    if (volcengineAppId) localStorage.setItem(VOLCENGINE_APP_ID_STORAGE_KEY, volcengineAppId);
+    else localStorage.removeItem(VOLCENGINE_APP_ID_STORAGE_KEY);
+    if (volcengineToken) localStorage.setItem(VOLCENGINE_TOKEN_STORAGE_KEY, volcengineToken);
+    else localStorage.removeItem(VOLCENGINE_TOKEN_STORAGE_KEY);
+    if (volcengineCluster) localStorage.setItem(VOLCENGINE_CLUSTER_STORAGE_KEY, volcengineCluster);
+    if (volcengineAudioUrl) localStorage.setItem(VOLCENGINE_AUDIO_URL_STORAGE_KEY, volcengineAudioUrl);
+    else localStorage.removeItem(VOLCENGINE_AUDIO_URL_STORAGE_KEY);
+    if (funasrModel) localStorage.setItem(FUNASR_MODEL_STORAGE_KEY, funasrModel);
+    if (funasrVadModel) localStorage.setItem(FUNASR_VAD_MODEL_STORAGE_KEY, funasrVadModel);
+    if (funasrPuncModel) localStorage.setItem(FUNASR_PUNC_MODEL_STORAGE_KEY, funasrPuncModel);
+    if (funasrSpkModel) localStorage.setItem(FUNASR_SPK_MODEL_STORAGE_KEY, funasrSpkModel);
+    if (funasrBatchSize) localStorage.setItem(FUNASR_BATCH_SIZE_STORAGE_KEY, funasrBatchSize);
+    if (funasrHotword) localStorage.setItem(FUNASR_HOTWORD_STORAGE_KEY, funasrHotword);
+    else localStorage.removeItem(FUNASR_HOTWORD_STORAGE_KEY);
     const hfToken = hfTokenInput.value.trim();
     const speakerDisplayName = speakerDisplayNameInput.value.trim();
     if (hfToken) localStorage.setItem(HF_TOKEN_STORAGE_KEY, hfToken);
@@ -952,18 +1022,37 @@ async function enrollCurrentSpeaker() {
 
 async function runDiarizedAsr() {
   const localPath = currentLocalMediaPath();
-  if (!localPath) {
+  const provider = asrProviderInput.value || "volcengine";
+  const useVolcengine = provider === "volcengine";
+  const useFunasr = provider === "funasr";
+  if (!useVolcengine && !localPath) {
     setStatus("缺少路径", "warn");
     resultText.textContent = "先填入本地视频/音频路径。长期 ASR 会直接从磁盘读取大文件。";
     localAsrPathInput.focus();
+    return;
+  }
+  if (useVolcengine && !volcengineAudioUrlInput.value.trim()) {
+    setStatus("缺少火山 URL", "warn");
+    resultText.textContent = "火山引擎需要一个公网可访问的音视频 URL；本地 C:\\tmp 路径不能直接提交给云端。";
+    volcengineAudioUrlInput.focus();
+    return;
+  }
+  if (useVolcengine && (!volcengineAppIdInput.value.trim() || !volcengineTokenInput.value.trim())) {
+    setStatus("缺少火山凭证", "warn");
+    resultText.textContent = "火山引擎模式需要填写 AppID 和 Access Token。";
+    (!volcengineAppIdInput.value.trim() ? volcengineAppIdInput : volcengineTokenInput).focus();
     return;
   }
   cacheSettings();
   setAsrBusy(true);
   setStatus("说话人分离中", "warn");
   resultText.textContent = [
-    "正在跑长期 ASR：pyannote 先分离说话人，Whisper 再转写并按时间对齐。",
-    "如果是首次使用，pyannote/Whisper 可能会下载模型权重，长视频会等待较久。",
+    useVolcengine
+      ? "正在启动火山引擎 ASR：云端转写并返回说话人分离结果。"
+      : useFunasr
+        ? "正在启动 FunASR 本地 ASR：本地转写、VAD、标点，并尝试返回说话人分段。"
+      : "正在跑长期 ASR：pyannote 先分离说话人，Whisper 再转写并按时间对齐。",
+    "长视频会等待较久，后台任务会持续轮询状态。",
   ].join("\n");
   try {
     const response = await fetch("/api/multimodal/diarized-asr-job", {
@@ -975,6 +1064,17 @@ async function runDiarizedAsr() {
         compute_type: localAsrComputeInput.value,
         language: localAsrLanguageInput.value || "zh",
         hf_token: hfTokenInput.value.trim(),
+        asr_provider: provider,
+        volcengine_app_id: volcengineAppIdInput.value.trim(),
+        volcengine_token: volcengineTokenInput.value.trim(),
+        volcengine_cluster: volcengineClusterInput.value.trim(),
+        volcengine_audio_url: volcengineAudioUrlInput.value.trim(),
+        funasr_model: funasrModelInput.value.trim(),
+        funasr_vad_model: funasrVadModelInput.value.trim(),
+        funasr_punc_model: funasrPuncModelInput.value.trim(),
+        funasr_spk_model: funasrSpkModelInput.value.trim(),
+        funasr_batch_size_s: Number(funasrBatchSizeInput.value || 300),
+        funasr_hotword: funasrHotwordInput.value.trim(),
       }),
     });
     const jobData = await response.json();
@@ -1034,6 +1134,30 @@ localAsrPathInput.addEventListener("change", cacheSettings);
 localAsrPathInput.addEventListener("blur", cacheSettings);
 localAsrModelInput.addEventListener("change", cacheSettings);
 localAsrModelInput.addEventListener("blur", cacheSettings);
+asrProviderInput.addEventListener("change", () => {
+  updateAsrProviderPanels();
+  cacheSettings();
+});
+volcengineAppIdInput.addEventListener("change", cacheSettings);
+volcengineAppIdInput.addEventListener("blur", cacheSettings);
+volcengineTokenInput.addEventListener("change", cacheSettings);
+volcengineTokenInput.addEventListener("blur", cacheSettings);
+volcengineClusterInput.addEventListener("change", cacheSettings);
+volcengineClusterInput.addEventListener("blur", cacheSettings);
+volcengineAudioUrlInput.addEventListener("change", cacheSettings);
+volcengineAudioUrlInput.addEventListener("blur", cacheSettings);
+funasrModelInput.addEventListener("change", cacheSettings);
+funasrModelInput.addEventListener("blur", cacheSettings);
+funasrVadModelInput.addEventListener("change", cacheSettings);
+funasrVadModelInput.addEventListener("blur", cacheSettings);
+funasrPuncModelInput.addEventListener("change", cacheSettings);
+funasrPuncModelInput.addEventListener("blur", cacheSettings);
+funasrSpkModelInput.addEventListener("change", cacheSettings);
+funasrSpkModelInput.addEventListener("blur", cacheSettings);
+funasrBatchSizeInput.addEventListener("change", cacheSettings);
+funasrBatchSizeInput.addEventListener("blur", cacheSettings);
+funasrHotwordInput.addEventListener("change", cacheSettings);
+funasrHotwordInput.addEventListener("blur", cacheSettings);
 hfTokenInput.addEventListener("change", cacheSettings);
 hfTokenInput.addEventListener("blur", cacheSettings);
 speakerDisplayNameInput.addEventListener("change", cacheSettings);
