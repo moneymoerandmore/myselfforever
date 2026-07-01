@@ -19,7 +19,8 @@ ERR_FILE = DASHBOARD_DIR / "dashboard.err.log"
 def main() -> int:
     host = "127.0.0.1"
     port = "8788"
-    python = sys.executable
+    venv_python = ROOT / ".venv-dashboard" / "Scripts" / "python.exe"
+    python = str(venv_python) if venv_python.exists() else sys.executable
     command = [
         python,
         str(DASHBOARD_DIR / "server.py"),

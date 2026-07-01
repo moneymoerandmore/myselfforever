@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import csv
 from datetime import date
@@ -14,6 +15,7 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,9 @@ MAX_TOTAL_DATA_URL_CHARS = 8_000_000
 local_whisper_models: dict[tuple[str, str, str], Any] = {}
 pyannote_pipelines: dict[str, Any] = {}
 pyannote_embedding_inferences: dict[str, Any] = {}
+asr_jobs: dict[str, dict[str, Any]] = {}
+asr_jobs_lock = threading.Lock()
+asr_job_executor = ThreadPoolExecutor(max_workers=1)
 TOPIC_LABELS = {
     "ai_technology": "AI与技术",
     "work_organization": "工作与组织",
@@ -697,11 +702,20 @@ def module_available(name: str) -> bool:
 
 
 def pyannote_dependency_status() -> dict[str, Any]:
-    available = module_available("pyannote") and module_available("pyannote.audio")
+    dependencies = {
+        "pyannote.audio": module_available("pyannote") and module_available("pyannote.audio"),
+        "faster_whisper": module_available("faster_whisper"),
+        "torch": module_available("torch"),
+        "hf_xet": module_available("hf_xet"),
+        "soundfile": module_available("soundfile"),
+        "omegaconf": module_available("omegaconf"),
+    }
+    available = all(dependencies.values())
     return {
         "available": available,
-        "package": "pyannote.audio",
-        "install_hint": "pip install pyannote.audio soundfile",
+        "dependencies": dependencies,
+        "package": "pyannote.audio + faster-whisper",
+        "install_hint": "pip install pyannote.audio faster-whisper soundfile hf_xet omegaconf hydra-core",
     }
 
 
@@ -773,7 +787,8 @@ def get_pyannote_pipeline(token: str) -> Any:
     except ImportError as exc:
         raise ValueError("pyannote.audio 未安装，无法做长期说话人分离。") from exc
 
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+    pipeline_id = os.environ.get("DIGITAL_TWIN_PYANNOTE_PIPELINE", "pyannote/speaker-diarization-community-1")
+    pipeline = Pipeline.from_pretrained(pipeline_id, token=token)
     pyannote_pipelines[key] = pipeline
     return pipeline
 
@@ -788,10 +803,30 @@ def get_pyannote_embedding_inference(token: str) -> Any:
     except ImportError as exc:
         raise ValueError("pyannote.audio 未安装，无法建立声纹身份库。") from exc
 
-    model = Model.from_pretrained("pyannote/embedding", use_auth_token=token)
+    embedding_model_id = os.environ.get("DIGITAL_TWIN_PYANNOTE_EMBEDDING", "pyannote/embedding")
+    model = Model.from_pretrained(embedding_model_id, token=token)
     inference = Inference(model, window="whole")
     pyannote_embedding_inferences[key] = inference
     return inference
+
+
+def pyannote_audio_source(source_path: Path) -> dict[str, Any]:
+    try:
+        import torch
+        from faster_whisper.audio import decode_audio
+    except ImportError as exc:
+        raise ValueError("说话人分离需要 faster-whisper 和 torch 来解码本地音频。") from exc
+
+    try:
+        samples = decode_audio(str(source_path), sampling_rate=16000)
+    except Exception as exc:
+        raise ValueError(f"无法把本地视频/音频解码为 pyannote 可用的音频流：{exc}") from exc
+    waveform = torch.from_numpy(samples).float()
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim == 2 and waveform.shape[0] > waveform.shape[1]:
+        waveform = waveform.transpose(0, 1)
+    return {"waveform": waveform, "sample_rate": 16000}
 
 
 def normalize_embedding(value: Any) -> list[float]:
@@ -810,17 +845,17 @@ def normalize_embedding(value: Any) -> list[float]:
     return [item / norm for item in vector]
 
 
-def audio_embedding(source_path: Path, token: str, start: float | None = None, end: float | None = None) -> list[float]:
+def audio_embedding(audio_source: dict[str, Any], token: str, start: float | None = None, end: float | None = None) -> list[float]:
     inference = get_pyannote_embedding_inference(token)
     if start is None or end is None:
-        return normalize_embedding(inference(str(source_path)))
+        return normalize_embedding(inference(audio_source))
     try:
         from pyannote.core import Segment
 
         segment = Segment(float(start), float(end))
-        return normalize_embedding(inference.crop({"audio": str(source_path)}, segment))
+        return normalize_embedding(inference.crop(audio_source, segment))
     except Exception:
-        return normalize_embedding(inference(str(source_path)))
+        return normalize_embedding(inference(audio_source))
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -860,7 +895,8 @@ def enroll_speaker_profile(payload: dict[str, Any]) -> dict[str, Any]:
     display_name = str(payload.get("display_name") or "我").strip() or "我"
     role = str(payload.get("role") or ("self" if display_name == "我" else "contact")).strip() or "contact"
     profile_id = speaker_slug(str(payload.get("id") or display_name))
-    embedding = audio_embedding(source_path, token)
+    audio_source = pyannote_audio_source(source_path)
+    embedding = audio_embedding(audio_source, token)
     now = datetime.now().isoformat(timespec="seconds")
 
     payload_data = speaker_profiles_payload()
@@ -885,9 +921,16 @@ def enroll_speaker_profile(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def diarization_turns(source_path: Path, token: str) -> list[dict[str, Any]]:
+def diarization_turns(audio_source: dict[str, Any], token: str) -> list[dict[str, Any]]:
     pipeline = get_pyannote_pipeline(token)
-    diarization = pipeline(str(source_path))
+    output = pipeline(audio_source)
+    diarization = (
+        getattr(output, "exclusive_speaker_diarization", None)
+        or getattr(output, "speaker_diarization", None)
+        or output
+    )
+    if not hasattr(diarization, "itertracks"):
+        raise ValueError(f"pyannote returned unsupported diarization output: {type(output).__name__}")
     turns: list[dict[str, Any]] = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         turns.append(
@@ -921,7 +964,7 @@ def speaker_for_interval(start: float, end: float, turns: list[dict[str, Any]]) 
     return best_speaker
 
 
-def summarize_diarized_speakers(source_path: Path, token: str, turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def summarize_diarized_speakers(audio_source: dict[str, Any], token: str, turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
     profile_payload = speaker_profiles_payload()
     profiles = profile_payload.get("profiles", [])
     speakers = sorted({str(turn["speaker"]) for turn in turns})
@@ -931,7 +974,7 @@ def summarize_diarized_speakers(source_path: Path, token: str, turns: list[dict[
         speaker_turns = [turn for turn in turns if turn["speaker"] == speaker]
         duration = sum(max(0.0, float(turn["end"]) - float(turn["start"])) for turn in speaker_turns)
         longest = max(speaker_turns, key=lambda turn: float(turn["end"]) - float(turn["start"]))
-        embedding = audio_embedding(source_path, token, float(longest["start"]), float(longest["end"]))
+        embedding = audio_embedding(audio_source, token, float(longest["start"]), float(longest["end"]))
         identity = best_speaker_identity(embedding, profiles)
         display_name = identity["display_name"] if identity else speaker
         speaker_name_map[speaker] = str(display_name)
@@ -951,8 +994,9 @@ def call_diarized_whisper_asr(payload: dict[str, Any]) -> dict[str, Any]:
     source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
     token = hf_token_from_payload(payload)
     require_pyannote(token)
-    turns = diarization_turns(source_path, token)
-    speaker_summary, speaker_name_map = summarize_diarized_speakers(source_path, token, turns)
+    audio_source = pyannote_audio_source(source_path)
+    turns = diarization_turns(audio_source, token)
+    speaker_summary, speaker_name_map = summarize_diarized_speakers(audio_source, token, turns)
 
     asr_result = call_local_whisper_asr(payload)
     segments: list[dict[str, Any]] = []
@@ -1009,6 +1053,66 @@ def call_diarized_whisper_asr(payload: dict[str, Any]) -> dict[str, Any]:
         "language": asr_result.get("language"),
         "duration": asr_result.get("duration"),
     }
+
+
+def public_asr_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job.get("id"),
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "source_path": job.get("source_path"),
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+def update_asr_job(job_id: str, **updates: Any) -> None:
+    with asr_jobs_lock:
+        job = asr_jobs.get(job_id)
+        if job is None:
+            return
+        job.update(updates)
+        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def run_diarized_asr_job(job_id: str, payload: dict[str, Any]) -> None:
+    try:
+        update_asr_job(job_id, status="running", stage="说话人分离与 ASR 处理中")
+        result = call_diarized_whisper_asr(payload)
+    except Exception as exc:
+        update_asr_job(job_id, status="failed", stage="失败", error=str(exc))
+        return
+    update_asr_job(job_id, status="completed", stage="完成", result=result, error=None)
+
+
+def start_diarized_asr_job(payload: dict[str, Any]) -> dict[str, Any]:
+    source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    job_id = f"diarized-asr-job-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    now = datetime.now().isoformat(timespec="seconds")
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "stage": "排队中",
+        "created_at": now,
+        "updated_at": now,
+        "source_path": str(source_path),
+        "result": None,
+        "error": None,
+    }
+    with asr_jobs_lock:
+        asr_jobs[job_id] = job
+    asr_job_executor.submit(run_diarized_asr_job, job_id, dict(payload))
+    return public_asr_job(job)
+
+
+def get_asr_job(job_id: str) -> dict[str, Any]:
+    with asr_jobs_lock:
+        job = asr_jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"ASR job not found: {job_id}")
+        return public_asr_job(dict(job))
 
 
 def generate_multimodal_intake(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2077,6 +2181,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path == "/api/speaker-profiles":
             self.send_json({"ok": True, "result": list_speaker_profiles()})
             return
+        if self.path.startswith("/api/multimodal/asr-jobs/"):
+            job_id = self.path.rsplit("/", 1)[-1]
+            try:
+                self.send_json({"ok": True, "result": get_asr_job(job_id)})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=404)
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -2085,6 +2196,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/multimodal/intake",
             "/api/multimodal/local-asr",
             "/api/multimodal/diarized-asr",
+            "/api/multimodal/diarized-asr-job",
             "/api/multimodal/confirm",
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
@@ -2102,6 +2214,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = call_local_whisper_asr(payload)
             elif self.path == "/api/multimodal/diarized-asr":
                 result = call_diarized_whisper_asr(payload)
+            elif self.path == "/api/multimodal/diarized-asr-job":
+                result = start_diarized_asr_job(payload)
             elif self.path == "/api/multimodal/confirm":
                 result = confirm_multimodal_candidates(payload)
             elif self.path == "/api/speaker-profiles/enroll":

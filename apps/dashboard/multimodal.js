@@ -114,6 +114,12 @@ function currentLocalMediaPath() {
   return localAsrPathInput.value.trim();
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function appendTranscriptToTimeline(label, text) {
   transcriptText = normalizeTranscriptText(text);
   timelineTextInput.value = [timelineTextInput.value.trim(), transcriptText ? `${label}：\n${transcriptText}` : ""]
@@ -960,7 +966,7 @@ async function runDiarizedAsr() {
     "如果是首次使用，pyannote/Whisper 可能会下载模型权重，长视频会等待较久。",
   ].join("\n");
   try {
-    const response = await fetch("/api/multimodal/diarized-asr", {
+    const response = await fetch("/api/multimodal/diarized-asr-job", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -971,18 +977,37 @@ async function runDiarizedAsr() {
         hf_token: hfTokenInput.value.trim(),
       }),
     });
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.error || "说话人分离 ASR 失败");
-    const text = data.result?.text || "";
+    const jobData = await response.json();
+    if (!jobData.ok) throw new Error(jobData.error || "说话人分离 ASR 启动失败");
+    const jobId = jobData.result?.id;
+    if (!jobId) throw new Error("说话人分离 ASR 启动失败：没有返回任务 ID");
+    let job = jobData.result;
+    resultText.textContent = `后台任务已启动：${jobId}\n${job.stage || job.status || "排队中"}`;
+    while (job.status !== "completed" && job.status !== "failed") {
+      await delay(3000);
+      const pollResponse = await fetch(`/api/multimodal/asr-jobs/${encodeURIComponent(jobId)}`);
+      const pollData = await pollResponse.json();
+      if (!pollData.ok) throw new Error(pollData.error || "说话人分离 ASR 状态读取失败");
+      job = pollData.result || {};
+      resultText.textContent = [
+        `后台任务：${jobId}`,
+        `状态：${job.status || "--"}`,
+        `阶段：${job.stage || "--"}`,
+        "长视频会持续较久，可以保持页面打开等待结果。",
+      ].join("\n");
+    }
+    if (job.status === "failed") throw new Error(job.error || "说话人分离 ASR 失败");
+    const asrResult = job.result || {};
+    const text = asrResult.text || "";
     appendTranscriptToTimeline("说话人分离 ASR", text);
-    const speakers = data.result?.speakers || [];
+    const speakers = asrResult.speakers || [];
     transcriptMeta.textContent = `说话人分离 ASR 完成 · ${speakers.length} 个说话人 · ${transcriptText.length} 字`;
     resultText.textContent = [
       "说话人：",
       speakerSummaryText(speakers),
       "",
       transcriptText || "ASR 完成，但没有识别到文字。",
-      data.result?.saved_path ? `\n保存位置：${data.result.saved_path}` : "",
+      asrResult.saved_path ? `\n保存位置：${asrResult.saved_path}` : "",
     ]
       .filter(Boolean)
       .join("\n");
