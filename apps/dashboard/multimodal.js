@@ -2,7 +2,6 @@ const poeApiKeyInput = document.querySelector("#poeApiKey");
 const poeModelInput = document.querySelector("#poeModel");
 const clearPoeApiKeyButton = document.querySelector("#clearPoeApiKey");
 const mediaFileInput = document.querySelector("#mediaFile");
-const transcriptFileInput = document.querySelector("#transcriptFile");
 const localAsrPathInput = document.querySelector("#localAsrPath");
 const localAsrModelInput = document.querySelector("#localAsrModel");
 const localAsrComputeInput = document.querySelector("#localAsrCompute");
@@ -234,15 +233,6 @@ function readFileAsDataUrl(file) {
     reader.addEventListener("load", () => resolve(String(reader.result || "")));
     reader.addEventListener("error", () => reject(reader.error || new Error("文件读取失败")));
     reader.readAsDataURL(file);
-  });
-}
-
-function readFileAsText(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result || "")));
-    reader.addEventListener("error", () => reject(reader.error || new Error("文件读取失败")));
-    reader.readAsText(file, "utf-8");
   });
 }
 
@@ -827,7 +817,7 @@ async function analyzeMaterial() {
   const mediaKind = currentFile?.type.startsWith("video/") ? "video_sampled_frames" : currentFile?.type.startsWith("image/") ? "image" : "text_only";
   const timelineHasTranscript =
     transcriptText && timelineText.includes(transcriptText.slice(0, Math.min(120, transcriptText.length)));
-  const transcriptBlock = transcriptText && !timelineHasTranscript ? `字幕/ASR 转写：\n${transcriptText}` : "";
+  const transcriptBlock = transcriptText && !timelineHasTranscript ? `模型 ASR 转写：\n${transcriptText}` : "";
   try {
     const response = await fetch("/api/multimodal/intake", {
       method: "POST",
@@ -883,38 +873,19 @@ function onFileSelected() {
 
 function clearAll() {
   mediaFileInput.value = "";
-  transcriptFileInput.value = "";
   currentFile = null;
   transcriptText = "";
   noteInput.value = "";
   contextInput.value = "";
   timelineTextInput.value = "";
   sourceMeta.textContent = "未选择文件";
-  transcriptMeta.textContent = "可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原";
+  transcriptMeta.textContent = "视频流进入后，转写、说话人和语气线索都由下方 ASR 服务处理并写入时间线。";
   resultMeta.textContent = "不会直接改写 SelfCore";
   resultText.textContent = "等待分析。";
   hideConfirmationPanel();
   lastAnalysisResult = null;
   setStatus("待摄入");
   resetFrames();
-}
-
-async function onTranscriptSelected() {
-  const file = transcriptFileInput.files?.[0] || null;
-  transcriptText = "";
-  if (!file) {
-    transcriptMeta.textContent = "可选：放入 ASR 转写、字幕或会议纪要，视频气氛和表达风格主要靠它还原";
-    return;
-  }
-  try {
-    const rawText = await readFileAsText(file);
-    transcriptText = normalizeTranscriptText(rawText);
-    const clipped = rawText.length > transcriptText.length ? " · 已截取前 50000 字" : "";
-    transcriptMeta.textContent = `${file.name} · ${formatBytes(file.size)} · ${transcriptText.length} 字${clipped}`;
-  } catch (error) {
-    transcriptMeta.textContent = `转写读取失败：${error.message}`;
-    transcriptText = "";
-  }
 }
 
 async function runLocalWhisperAsr() {
@@ -1163,7 +1134,6 @@ hfTokenInput.addEventListener("blur", cacheSettings);
 speakerDisplayNameInput.addEventListener("change", cacheSettings);
 speakerDisplayNameInput.addEventListener("blur", cacheSettings);
 mediaFileInput.addEventListener("change", onFileSelected);
-transcriptFileInput.addEventListener("change", onTranscriptSelected);
 extractButton.addEventListener("click", extractFrames);
 localAsrButton.addEventListener("click", runLocalWhisperAsr);
 enrollSpeakerButton.addEventListener("click", enrollCurrentSpeaker);

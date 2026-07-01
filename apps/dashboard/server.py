@@ -14,6 +14,7 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -703,7 +704,42 @@ def module_available(name: str) -> bool:
         return False
 
 
+def configure_ffmpeg() -> str | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return None
+
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+    ffmpeg_path = Path(ffmpeg)
+    if not ffmpeg_path.exists():
+        return None
+    shim_dir = ROOT / "data" / "generated" / "runtime-bin"
+    shim_path = shim_dir / "ffmpeg.exe"
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        if not shim_path.exists() or shim_path.stat().st_size != ffmpeg_path.stat().st_size:
+            shutil.copy2(ffmpeg_path, shim_path)
+        ffmpeg_path = shim_path
+    except OSError:
+        pass
+    os.environ["IMAGEIO_FFMPEG_EXE"] = str(ffmpeg_path)
+    os.environ["FFMPEG_BINARY"] = str(ffmpeg_path)
+    path_value = os.environ.get("PATH", "")
+    ffmpeg_dir = str(ffmpeg_path.parent)
+    if ffmpeg_dir not in path_value.split(os.pathsep):
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + path_value
+    return str(ffmpeg_path)
+
+
 def pyannote_dependency_status() -> dict[str, Any]:
+    ffmpeg_path = configure_ffmpeg()
     dependencies = {
         "pyannote.audio": module_available("pyannote") and module_available("pyannote.audio"),
         "faster_whisper": module_available("faster_whisper"),
@@ -713,18 +749,21 @@ def pyannote_dependency_status() -> dict[str, Any]:
         "omegaconf": module_available("omegaconf"),
         "funasr": module_available("funasr"),
         "modelscope": module_available("modelscope"),
+        "imageio_ffmpeg": module_available("imageio_ffmpeg"),
+        "ffmpeg": bool(ffmpeg_path),
     }
     local_pyannote_available = all(
         dependencies[name]
         for name in ["pyannote.audio", "faster_whisper", "torch", "hf_xet", "soundfile", "omegaconf"]
     )
-    funasr_available = dependencies["funasr"] and dependencies["modelscope"]
+    funasr_available = dependencies["funasr"] and dependencies["modelscope"] and dependencies["ffmpeg"]
     return {
         "available": local_pyannote_available,
         "funasr_available": funasr_available,
         "dependencies": dependencies,
+        "ffmpeg_path": ffmpeg_path,
         "package": "pyannote.audio + faster-whisper; FunASR optional",
-        "install_hint": "pip install pyannote.audio faster-whisper soundfile hf_xet omegaconf hydra-core funasr modelscope",
+        "install_hint": "pip install pyannote.audio faster-whisper soundfile hf_xet omegaconf hydra-core funasr modelscope imageio-ffmpeg",
     }
 
 
@@ -1496,6 +1535,8 @@ def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any])
 
 def call_funasr_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
     source_path = resolve_local_media_path(str(payload.get("local_path") or ""))
+    if configure_ffmpeg() is None:
+        raise ValueError("FunASR 处理视频/音频需要 ffmpeg；请安装 imageio-ffmpeg 或把 ffmpeg.exe 加入 PATH。")
     config = funasr_config(payload)
     model = get_funasr_model(config)
     generate_kwargs: dict[str, Any] = {
@@ -1506,7 +1547,10 @@ def call_funasr_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if config["hotword"]:
         generate_kwargs["hotword"] = config["hotword"]
-    raw_result = model.generate(**generate_kwargs)
+    try:
+        raw_result = model.generate(**generate_kwargs)
+    except FileNotFoundError as exc:
+        raise ValueError(f"FunASR 调用外部解码工具失败，通常是 ffmpeg 不可用；原始错误：{exc}") from exc
     return normalize_funasr_result(raw_result, source_path, config)
 
 
