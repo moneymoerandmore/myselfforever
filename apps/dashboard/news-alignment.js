@@ -3,17 +3,23 @@ const poeModelInput = document.querySelector("#poeModel");
 const newsTextInput = document.querySelector("#newsText");
 const userAlignmentInput = document.querySelector("#userAlignment");
 const clearButton = document.querySelector("#clearButton");
+const fetchNewsButton = document.querySelector("#fetchNewsButton");
 const analyzeButton = document.querySelector("#analyzeButton");
 const confirmButton = document.querySelector("#confirmButton");
 const resultMeta = document.querySelector("#resultMeta");
 const analysisText = document.querySelector("#analysisText");
 const confirmMeta = document.querySelector("#confirmMeta");
 const candidateList = document.querySelector("#candidateList");
+const newsList = document.querySelector("#newsList");
+const newsDetail = document.querySelector("#newsDetail");
 
 const POE_API_KEY_STORAGE_KEY = "digitalTwin.poeApiKey";
 const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 
 let lastAnalysis = null;
+let fetchedNewsItems = [];
+let selectedNewsIndex = 0;
+let alignmentNotesByNewsId = {};
 
 function restoreSettings() {
   try {
@@ -43,50 +49,142 @@ function emptyNode(text) {
   return node;
 }
 
-function stringifyAnalysis(result) {
-  const sections = [];
-  sections.push(`今日摘要：\n${result.daily_summary || "--"}`);
-  const selected = Array.isArray(result.selected_news) ? result.selected_news : [];
-  if (selected.length) {
-    sections.push(
-      selected
-        .map((item, index) => {
-          return [
-            `${index + 1}. ${item.title || item.news_id || "新闻"}`,
-            `事实：${item.fact_summary || "--"}`,
-            `为什么关心：${item.why_user_may_care || "--"}`,
-            `第一反应：${item.first_reaction || "--"}`,
-            `判断框架：${item.judgment_frame || "--"}`,
-            `不确定性：${(item.uncertainties || []).join("；") || "--"}`,
-            `追问：${(item.questions_for_user || []).join("；") || "--"}`,
-            `长期更新：${item.long_term_update || "none"}`,
-          ].join("\n");
-        })
-        .join("\n\n")
-    );
+function currentNewsItem() {
+  return fetchedNewsItems[selectedNewsIndex] || null;
+}
+
+function currentNewsId() {
+  return currentNewsItem()?.news_id || "";
+}
+
+function saveCurrentAlignmentNote() {
+  const id = currentNewsId();
+  if (!id) return;
+  alignmentNotesByNewsId[id] = userAlignmentInput.value.trim();
+}
+
+function loadCurrentAlignmentNote() {
+  const id = currentNewsId();
+  userAlignmentInput.value = id ? alignmentNotesByNewsId[id] || "" : "";
+}
+
+function buildUserAlignmentText() {
+  saveCurrentAlignmentNote();
+  return fetchedNewsItems
+    .map((item, index) => {
+      const note = alignmentNotesByNewsId[item.news_id]?.trim();
+      return note ? `${index + 1}. ${item.title || item.news_id}\n${note}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function candidateSourceIds(item) {
+  return Array.isArray(item.source_news_ids) ? item.source_news_ids : [];
+}
+
+function renderNewsBrowser() {
+  newsList.innerHTML = "";
+  if (!fetchedNewsItems.length) {
+    newsDetail.className = "news-detail empty";
+    newsDetail.textContent = "自动拉取后，详情会显示在这里。";
+    userAlignmentInput.value = "";
+    return;
   }
-  const questions = Array.isArray(result.questions_for_user) ? result.questions_for_user : [];
-  if (questions.length) sections.push(`跨新闻校对问题：\n${questions.map((item) => `- ${item}`).join("\n")}`);
-  const outbound = Array.isArray(result.outbound_topic_signals) ? result.outbound_topic_signals : [];
-  if (outbound.length) sections.push(`可交给对外主动沟通重新评估的话题：\n${outbound.map((item) => `- ${item}`).join("\n")}`);
-  const risky = Array.isArray(result.rejected_or_risky) ? result.rejected_or_risky : [];
-  if (risky.length) sections.push(`不沉淀/有风险：\n${risky.map((item) => `- ${item}`).join("\n")}`);
-  return sections.join("\n\n");
+
+  selectedNewsIndex = Math.min(Math.max(selectedNewsIndex, 0), fetchedNewsItems.length - 1);
+  fetchedNewsItems.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `news-tab${index === selectedNewsIndex ? " active" : ""}`;
+    button.innerHTML = `<span>${index + 1}</span><strong></strong>`;
+    button.querySelector("strong").textContent = item.title || item.news_id || "未命名新闻";
+    button.addEventListener("click", () => {
+      saveCurrentAlignmentNote();
+      selectedNewsIndex = index;
+      renderNewsBrowser();
+      renderAnalysisForSelected();
+      renderCandidates(lastAnalysis || {});
+    });
+    newsList.appendChild(button);
+  });
+
+  const item = currentNewsItem();
+  const hasFallbackDetail = item.detail && item.detail_status && item.detail_status !== "ok";
+  const rows = hasFallbackDetail
+    ? [item.detail]
+    : [
+        item.title ? `标题：${item.title}` : "",
+        item.tags ? `标签：${item.tags}` : "",
+        item.published_at ? `时间：${item.published_at}` : "",
+        item.source ? `来源：${item.source}` : "",
+        item.source_url ? `来源站点：${item.source_url}` : "",
+        item.detail_status ? `正文状态：${item.detail_status}` : "",
+        item.summary ? `摘要：${item.summary}` : "",
+        item.detail
+          ? `详情：\n${item.detail}`
+          : `详情：暂未抽取到正文详情（${item.detail_status || "unknown"}）。可以点来源链接查看原文。`,
+        item.url ? `聚合链接：${item.url}` : "",
+      ].filter(Boolean);
+  newsDetail.className = "news-detail";
+  newsDetail.textContent = rows.join("\n\n");
+  loadCurrentAlignmentNote();
+}
+
+function analysisForCurrentNews() {
+  const id = currentNewsId();
+  const rows = Array.isArray(lastAnalysis?.selected_news) ? lastAnalysis.selected_news : [];
+  return rows.find((item) => item.news_id === id) || null;
+}
+
+function renderAnalysisForSelected() {
+  if (!lastAnalysis) {
+    analysisText.textContent = fetchedNewsItems.length
+      ? "已拉取新闻。下一步点击“生成对齐分析”，让数字“我”逐条输出观点。"
+      : "分析结果会显示在这里。";
+    return;
+  }
+
+  const item = analysisForCurrentNews();
+  if (!item) {
+    analysisText.textContent = [
+      `今日摘要：${lastAnalysis.daily_summary || "--"}`,
+      "",
+      "当前新闻还没有对应初判。可以补充校对意见后重新生成。",
+    ].join("\n");
+    return;
+  }
+
+  analysisText.textContent = [
+    `事实：${item.fact_summary || "--"}`,
+    `为什么关心：${item.why_user_may_care || "--"}`,
+    `第一反应：${item.first_reaction || "--"}`,
+    `我的观点：${item.my_viewpoint || item.first_reaction || "--"}`,
+    `判断框架：${item.judgment_frame || "--"}`,
+    `不确定性：${(item.uncertainties || []).join("；") || "--"}`,
+    `想问你：${(item.questions_for_user || []).join("；") || "--"}`,
+    `可以和谁聊：${(item.can_discuss_with || []).join("；") || "--"}`,
+    `不适合聊给谁：${(item.not_for || []).join("；") || "--"}`,
+    `长期更新：${item.long_term_update || "none"}`,
+  ].join("\n\n");
 }
 
 function renderCandidates(result) {
   candidateList.innerHTML = "";
-  const candidates = Array.isArray(result.calibration_candidates) ? result.calibration_candidates : [];
+  const allCandidates = Array.isArray(result.calibration_candidates) ? result.calibration_candidates : [];
+  const id = currentNewsId();
+  const candidates = id ? allCandidates.filter((item) => candidateSourceIds(item).includes(id)) : allCandidates;
   if (!candidates.length) {
-    candidateList.appendChild(emptyNode("本次没有可确认的 SelfCore 候选。"));
-    confirmMeta.textContent = "可以补充你的校对意见后重新生成";
+    candidateList.appendChild(emptyNode("当前新闻没有可确认的 SelfCore 候选。"));
+    confirmMeta.textContent = "可以在校对说明里补充你的真实观点后重新生成。";
     return;
   }
-  confirmMeta.textContent = `${candidates.length} 条候选，默认只勾选模型认为需要确认的项`;
-  for (const [index, item] of candidates.entries()) {
+
+  confirmMeta.textContent = `当前新闻 ${candidates.length} 条候选，默认只勾选模型认为需要确认的项。`;
+  for (const item of candidates) {
     const card = document.createElement("article");
     card.className = "candidate-card";
-    card.dataset.index = String(index);
+    card.dataset.index = String(allCandidates.indexOf(item));
 
     const label = document.createElement("label");
     const checkbox = document.createElement("input");
@@ -103,7 +201,7 @@ function renderCandidates(result) {
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `新闻来源：${(item.source_news_ids || []).join(", ") || "--"} · 证据：${item.evidence || "--"}`;
+    meta.textContent = `新闻来源：${candidateSourceIds(item).join(", ") || "--"} · 证据：${item.evidence || "--"}`;
 
     card.append(label, textarea, meta);
     candidateList.appendChild(card);
@@ -128,8 +226,8 @@ function selectedConfirmations() {
 async function analyzeNews() {
   cacheSettings();
   const newsText = newsTextInput.value.trim();
-  if (!newsText) {
-    resultMeta.textContent = "先粘贴今天的 10 条新闻";
+  if (!newsText && !fetchedNewsItems.length) {
+    resultMeta.textContent = "先粘贴或自动拉取今天的 10 条新闻";
     return;
   }
   if (!poeApiKeyInput.value.trim()) {
@@ -137,17 +235,19 @@ async function analyzeNews() {
     poeApiKeyInput.focus();
     return;
   }
+
   analyzeButton.disabled = true;
   resultMeta.textContent = "正在生成新闻对齐分析...";
-  analysisText.textContent = "模型正在根据 SelfCore、新闻事实和你的补充生成初判。";
+  analysisText.textContent = "模型正在根据 SelfCore、新闻事实和你的补充生成逐条初判。";
   candidateList.innerHTML = "";
   try {
     const response = await fetch("/api/news-alignment/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        news_items: fetchedNewsItems,
         news_text: newsText,
-        user_alignment: userAlignmentInput.value.trim(),
+        user_alignment: buildUserAlignmentText(),
         poe_api_key: poeApiKeyInput.value.trim(),
         poe_model: poeModelInput.value.trim(),
       }),
@@ -156,7 +256,7 @@ async function analyzeNews() {
     if (!data.ok) throw new Error(data.error || "生成失败");
     lastAnalysis = data.result;
     resultMeta.textContent = `${data.result.news_count || 0} 条新闻 · 记录 ${data.result.id || "--"}`;
-    analysisText.textContent = stringifyAnalysis(data.result);
+    renderAnalysisForSelected();
     renderCandidates(data.result);
   } catch (error) {
     lastAnalysis = null;
@@ -169,12 +269,58 @@ async function analyzeNews() {
   }
 }
 
+function renderFetchedNews(items) {
+  fetchedNewsItems = items;
+  selectedNewsIndex = 0;
+  lastAnalysis = null;
+  alignmentNotesByNewsId = {};
+  newsTextInput.value = items
+    .map((item, index) => {
+      return [
+        `${index + 1}. ${item.title || ""}`,
+        item.summary ? `摘要：${item.summary}` : "",
+        item.detail ? `详情：${item.detail}` : "",
+        item.source ? `来源：${item.source}` : "",
+        item.source_url ? `来源站点：${item.source_url}` : "",
+        item.published_at ? `时间：${item.published_at}` : "",
+        item.tags ? `标签：${item.tags}` : "",
+        item.url ? `链接：${item.url}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n\n");
+  renderNewsBrowser();
+  renderAnalysisForSelected();
+  renderCandidates({});
+}
+
+async function fetchNews() {
+  fetchNewsButton.disabled = true;
+  resultMeta.textContent = "正在拉取可讨论新闻...";
+  try {
+    const response = await fetch("/api/news-alignment/fetch?limit=10");
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "拉取失败");
+    const items = data.result?.news_items || [];
+    renderFetchedNews(items);
+    const errorText = data.result?.errors?.length ? `；部分源失败：${data.result.errors.join("；")}` : "";
+    resultMeta.textContent = `已拉取 ${items.length} 条可讨论新闻${errorText}`;
+  } catch (error) {
+    resultMeta.textContent = `拉取失败：${error.message}`;
+    analysisText.textContent = "可以手动粘贴 10 条新闻继续对齐。";
+  } finally {
+    fetchNewsButton.disabled = false;
+  }
+}
+
 async function confirmCandidates() {
   const confirmations = selectedConfirmations();
   if (!lastAnalysis || !confirmations.length) {
     confirmMeta.textContent = "先生成分析，并勾选要写入候选池的项";
     return;
   }
+
   confirmButton.disabled = true;
   confirmMeta.textContent = "正在写入 SelfCore 候选池...";
   try {
@@ -189,7 +335,7 @@ async function confirmCandidates() {
     });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "写入失败");
-    confirmMeta.textContent = `已写入 ${data.result?.injected_count || confirmations.length} 条候选；可去 SelfCore 候选页合并。`;
+    confirmMeta.textContent = `已写入 ${data.result?.injected_count || confirmations.length} 条候选；可去新闻候选池合并。`;
   } catch (error) {
     confirmMeta.textContent = `写入失败：${error.message}`;
   } finally {
@@ -200,16 +346,36 @@ async function confirmCandidates() {
 clearButton.addEventListener("click", () => {
   newsTextInput.value = "";
   userAlignmentInput.value = "";
-  analysisText.textContent = "分析结果会显示在这里。";
+  fetchedNewsItems = [];
+  selectedNewsIndex = 0;
+  alignmentNotesByNewsId = {};
+  lastAnalysis = null;
   resultMeta.textContent = "等待输入";
   confirmMeta.textContent = "只写入你勾选确认的候选。";
   candidateList.innerHTML = "";
-  lastAnalysis = null;
+  candidateList.appendChild(emptyNode("生成分析后会出现候选。"));
+  renderNewsBrowser();
+  renderAnalysisForSelected();
 });
+
+newsTextInput.addEventListener("input", () => {
+  fetchedNewsItems = [];
+  selectedNewsIndex = 0;
+  alignmentNotesByNewsId = {};
+  lastAnalysis = null;
+  renderNewsBrowser();
+  renderAnalysisForSelected();
+  renderCandidates({});
+});
+userAlignmentInput.addEventListener("input", saveCurrentAlignmentNote);
+
 analyzeButton.addEventListener("click", analyzeNews);
+fetchNewsButton.addEventListener("click", fetchNews);
 confirmButton.addEventListener("click", confirmCandidates);
 poeApiKeyInput.addEventListener("change", cacheSettings);
 poeModelInput.addEventListener("change", cacheSettings);
 
 restoreSettings();
+renderNewsBrowser();
+renderAnalysisForSelected();
 candidateList.appendChild(emptyNode("生成分析后会出现候选。"));

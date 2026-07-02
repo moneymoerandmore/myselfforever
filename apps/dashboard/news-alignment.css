@@ -93,7 +93,7 @@ button.ghost {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(340px, 0.34fr) minmax(420px, 0.36fr) minmax(340px, 0.3fr);
+  grid-template-columns: minmax(260px, 0.25fr) minmax(520px, 0.47fr) minmax(320px, 0.28fr);
   gap: 14px;
   align-items: start;
 }
@@ -145,6 +145,88 @@ textarea {
   line-height: 1.55;
 }
 
+.hidden-field {
+  display: none;
+}
+
+.news-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  max-height: 680px;
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.news-tab {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 46px;
+  border-color: var(--line);
+  background: #fff;
+  color: var(--text);
+  padding: 8px;
+  text-align: left;
+  white-space: normal;
+}
+
+.news-tab:hover,
+.news-tab.active {
+  border-color: var(--accent);
+  background: #edf7f5;
+  color: var(--text);
+}
+
+.news-tab span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  background: #dce7e5;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.news-tab strong {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 650;
+  word-break: break-word;
+}
+
+.news-detail {
+  min-height: 280px;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.58;
+  color: var(--text);
+  background: #fbfcfc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.section-head {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.section-head h2 {
+  margin: 0 0 10px;
+  font-size: 19px;
+}
+
 input:focus,
 textarea:focus {
   border-color: var(--accent);
@@ -178,7 +260,9 @@ button:disabled {
 }
 
 pre {
-  min-height: 520px;
+  min-height: 260px;
+  max-height: 360px;
+  overflow: auto;
   margin: 0;
   white-space: pre-wrap;
   line-height: 1.58;
@@ -188,6 +272,10 @@ pre {
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 14px;
+}
+
+.alignment-note {
+  margin-top: 14px;
 }
 
 .candidate-list {
@@ -248,5 +336,10 @@ pre {
   .settings,
   .workspace {
     grid-template-columns: 1fr;
+  }
+
+  .news-list,
+  .news-detail {
+    max-height: none;
   }
 }

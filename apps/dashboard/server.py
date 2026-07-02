@@ -9,6 +9,7 @@ from datetime import datetime
 import csv
 from datetime import date
 from difflib import SequenceMatcher
+import html
 import importlib.util
 import json
 import math
@@ -19,10 +20,12 @@ import shutil
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 
@@ -38,6 +41,8 @@ MULTIMODAL_CONFIRM_DIR = ROOT / "data" / "generated" / "multimodal-confirmations
 NEWS_ALIGNMENT_DIR = ROOT / "data" / "generated" / "news-alignment"
 MULTIMODAL_MEMORY_DIR = ROOT / "runtime" / "multimodal-memory"
 MULTIMODAL_MEMORY_PATH = MULTIMODAL_MEMORY_DIR / "confirmed-features.jsonl"
+NEWS_ALIGNMENT_MEMORY_DIR = ROOT / "runtime" / "self-alignment"
+NEWS_ALIGNMENT_MEMORY_PATH = NEWS_ALIGNMENT_MEMORY_DIR / "news-alignment-candidates.jsonl"
 SPEAKER_PROFILE_DIR = ROOT / "runtime" / "speaker-profiles"
 SPEAKER_PROFILE_PATH = SPEAKER_PROFILE_DIR / "profiles.json"
 SELFCORE_MERGE_DIR = ROOT / "data" / "generated" / "selfcore-candidate-merges"
@@ -64,6 +69,65 @@ TOPIC_LABELS = {
     "health_medical": "健康与医疗",
     "travel_life": "旅行与生活",
     "relationship_emotion": "关系与情绪",
+}
+
+NEWS_ALIGNMENT_FEEDS = [
+    {
+        "slug": "ai-agent",
+        "topic": "AI / 大模型 / Agent",
+        "url": "https://news.google.com/rss/search?q=AI%20OR%20%E5%A4%A7%E6%A8%A1%E5%9E%8B%20OR%20Agent&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+    {
+        "slug": "housing-city",
+        "topic": "房产 / 城市 / 居住",
+        "url": "https://news.google.com/rss/search?q=%E6%88%BF%E4%BA%A7%20OR%20%E6%A5%BC%E5%B8%82%20OR%20%E5%9F%8E%E5%B8%82%20OR%20%E5%B1%85%E4%BD%8F&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+    {
+        "slug": "macro-market",
+        "topic": "宏观 / 投资 / 市场",
+        "url": "https://news.google.com/rss/search?q=%E5%AE%8F%E8%A7%82%20OR%20%E8%82%A1%E7%A5%A8%20OR%20%E6%8A%95%E8%B5%84%20OR%20%E5%B8%82%E5%9C%BA&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+    {
+        "slug": "product-org",
+        "topic": "产品 / 组织 / 创业",
+        "url": "https://news.google.com/rss/search?q=%E4%BA%A7%E5%93%81%20OR%20%E5%88%9B%E4%B8%9A%20OR%20%E8%A3%81%E5%91%98%20OR%20%E8%9E%8D%E8%B5%84%20OR%20%E7%BB%84%E7%BB%87&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+    {
+        "slug": "policy-society",
+        "topic": "公共事件 / 政策 / 社会",
+        "url": "https://news.google.com/rss/search?q=%E6%94%BF%E7%AD%96%20OR%20%E7%9B%91%E7%AE%A1%20OR%20%E4%BA%89%E8%AE%AE%20OR%20%E7%A4%BE%E4%BC%9A&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    },
+]
+
+NEWS_DISCUSSION_KEYWORDS = {
+    "争议": 5,
+    "分歧": 5,
+    "反对": 4,
+    "质疑": 4,
+    "监管": 4,
+    "调查": 4,
+    "限制": 4,
+    "禁止": 4,
+    "裁员": 4,
+    "降价": 3,
+    "涨价": 3,
+    "上涨": 3,
+    "下跌": 3,
+    "亏损": 3,
+    "融资": 3,
+    "并购": 3,
+    "发布": 2,
+    "新规": 4,
+    "政策": 4,
+    "诉讼": 4,
+    "风险": 3,
+    "AI": 3,
+    "大模型": 3,
+    "Agent": 3,
+    "房价": 3,
+    "楼市": 3,
+    "股票": 3,
+    "宏观": 3,
 }
 
 
@@ -1991,7 +2055,10 @@ def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, st
                 title = str(item.get("title") or item.get("headline") or "").strip()
                 summary = str(item.get("summary") or item.get("content") or "").strip()
                 source = str(item.get("source") or item.get("url") or "").strip()
+                source_url = str(item.get("source_url") or "").strip()
                 published_at = str(item.get("published_at") or item.get("date") or "").strip()
+                detail = str(item.get("detail") or item.get("article_detail") or "").strip()
+                url = str(item.get("url") or "").strip()
                 tags = item.get("tags")
                 tag_text = ", ".join(str(tag) for tag in tags[:8]) if isinstance(tags, list) else str(tags or "").strip()
             else:
@@ -1999,6 +2066,9 @@ def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, st
                 summary = ""
                 source = ""
                 published_at = ""
+                detail = ""
+                url = ""
+                source_url = ""
                 tag_text = ""
             if title or summary:
                 items.append(
@@ -2007,7 +2077,10 @@ def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, st
                         "title": title[:300],
                         "summary": summary[:1200],
                         "source": source[:500],
+                        "url": url[:500],
+                        "source_url": source_url[:500],
                         "published_at": published_at[:80],
+                        "detail": detail[:2000],
                         "tags": tag_text[:200],
                     }
                 )
@@ -2027,6 +2100,7 @@ def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, st
                     "title": title[:300],
                     "summary": summary[:1200],
                     "source": "",
+                    "source_url": "",
                     "published_at": "",
                     "tags": "",
                 }
@@ -2043,7 +2117,10 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
                     f"- id: {item['news_id']}",
                     f"  title: {item['title']}",
                     f"  summary: {item['summary'] or '（无摘要）'}",
+                    f"  detail: {item.get('detail') or '（无详情）'}",
                     f"  source: {item['source'] or '（未提供）'}",
+                    f"  url: {item.get('url') or '（未提供）'}",
+                    f"  source_url: {item.get('source_url') or '（未提供）'}",
                     f"  published_at: {item['published_at'] or '（未提供）'}",
                     f"  tags: {item['tags'] or '（未提供）'}",
                 ]
@@ -2055,8 +2132,8 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
 现有 SelfCore 摘要：
 {self_core_excerpt()}
 
-已确认的候选记忆摘要：
-{confirmed_multimodal_memory_excerpt()}
+已确认的新闻对齐记忆摘要：
+{confirmed_news_alignment_memory_excerpt()}
 
 今日新闻候选：
 {chr(10).join(news_lines)}
@@ -2069,11 +2146,12 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
   "daily_summary": "今天 10 条新闻整体对用户画像有什么对齐价值",
   "selected_news": [
     {{
-      "news_id": "news-1",
+      "news_id": "news-1，必须覆盖输入里的每一条新闻，并保持原 news_id",
       "title": "新闻标题",
       "fact_summary": "只复述已给定事实，不补外部事实",
       "why_user_may_care": "为什么用户可能关心",
       "first_reaction": "数字“我”按当前 SelfCore 的第一反应",
+      "my_viewpoint": "直接输出数字“我”的观点，要有态度，但保留事实不足处的不确定性",
       "judgment_frame": "使用了什么判断框架",
       "uncertainties": ["事实不足或不能下结论的点"],
       "questions_for_user": ["最值得问用户确认的问题"],
@@ -2099,12 +2177,251 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
 
 硬规则：
 - 不得使用模型旧知识补齐新闻事实；只能基于输入新闻和用户补充。
+- `selected_news` 必须覆盖输入的全部新闻，不能只挑 3-5 条；如果某条不值得深入，仍要给出简短观点和跳过理由。
 - 二手新闻只进入候选判断，不进入确定结论。
 - 如果用户没有明确确认，`calibration_candidates.needs_user_confirmation` 必须为 true。
 - 候选要写成“用户的判断方式/关注点/表达边界”，不要写成新闻本身。
 - 区分短期关注和长期 SelfCore；单日兴趣波动优先标为 `daily_topic` 或 `short_term`。
 - 投资、医疗、法律、冲突和具体人评价不得写成确定性建议。
 """
+
+
+def strip_html_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def parse_rss_datetime(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S %z"):
+        try:
+            return datetime.strptime(text, fmt).isoformat(timespec="seconds")
+        except ValueError:
+            continue
+    return text[:120]
+
+
+def discussion_score(item: dict[str, str]) -> int:
+    text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')}"
+    score = 0
+    for keyword, weight in NEWS_DISCUSSION_KEYWORDS.items():
+        if keyword.lower() in text.lower():
+            score += weight
+    if item.get("source"):
+        score += 1
+    if item.get("published_at"):
+        score += 1
+    if len(item.get("summary", "")) >= 40:
+        score += 1
+    return score
+
+
+def fetch_rss_feed(feed: dict[str, str], timeout: float = 6.0) -> list[dict[str, str]]:
+    req = request.Request(
+        feed["url"],
+        headers={
+            "User-Agent": "DigitalTwinNewsAlignment/0.1",
+            "Accept": "application/rss+xml, application/xml, text/xml",
+        },
+    )
+    with request.urlopen(req, timeout=timeout) as response:
+        body = response.read(1_500_000)
+    root = ET.fromstring(body)
+    items: list[dict[str, str]] = []
+    for index, node in enumerate(root.findall(".//item")[:12], start=1):
+        title = strip_html_text(node.findtext("title") or "")
+        summary = strip_html_text(node.findtext("description") or "")
+        link = strip_html_text(node.findtext("link") or "")
+        published_at = parse_rss_datetime(node.findtext("pubDate") or "")
+        source_node = node.find("source")
+        source = strip_html_text(source_node.text if source_node is not None else "")
+        source_url = strip_html_text(source_node.attrib.get("url", "") if source_node is not None else "")
+        if not title:
+            continue
+        items.append(
+            {
+                "news_id": f"{feed.get('slug') or 'news'}-{index}",
+                "title": title[:300],
+                "summary": summary[:1000],
+                "source": source or link,
+                "url": link,
+                "source_url": source_url,
+                "published_at": published_at,
+                "tags": feed["topic"],
+            }
+        )
+    return items
+
+
+def extract_meta_content(html_text: str, key: str) -> str:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+name=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(key)}["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return strip_html_text(match.group(1))
+    return ""
+
+
+def is_weak_article_detail(url: str, detail: str) -> bool:
+    text = normalize_selfcore_text(detail)
+    parsed = urlparse(url)
+    if "news.google." in parsed.netloc:
+        return True
+    weak_phrases = [
+        "comprehensive up-to-date news coverage",
+        "aggregated from sources all over the world",
+        "google news",
+    ]
+    return any(phrase in text for phrase in weak_phrases)
+
+
+def fetch_article_detail(url: str, timeout: float = 5.0) -> dict[str, str]:
+    if not url:
+        return {"detail": "", "detail_status": "missing_url"}
+    try:
+        req = request.Request(
+            url,
+            headers={
+                "User-Agent": "DigitalTwinNewsAlignment/0.1",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        with request.urlopen(req, timeout=timeout) as response:
+            body = response.read(900_000)
+            content_type = response.headers.get("Content-Type", "")
+            final_url = response.geturl()
+        charset_match = re.search(r"charset=([\w\-]+)", content_type, flags=re.IGNORECASE)
+        charset = charset_match.group(1) if charset_match else "utf-8"
+        try:
+            text = body.decode(charset, errors="replace")
+        except LookupError:
+            text = body.decode("utf-8", errors="replace")
+        title = extract_meta_content(text, "og:title") or extract_meta_content(text, "twitter:title")
+        description = (
+            extract_meta_content(text, "og:description")
+            or extract_meta_content(text, "description")
+            or extract_meta_content(text, "twitter:description")
+        )
+        cleaned = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+        paragraphs = [
+            strip_html_text(match)
+            for match in re.findall(r"<p[^>]*>(.*?)</p>", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        ]
+        useful_paragraphs = [
+            paragraph
+            for paragraph in paragraphs
+            if len(paragraph) >= 28 and not re.search(r"版权所有|Copyright|登录|注册|客户端下载", paragraph, flags=re.IGNORECASE)
+        ][:4]
+        detail_parts = [description, *useful_paragraphs]
+        detail = "\n".join(part for part in detail_parts if part)
+        if detail and is_weak_article_detail(final_url or url, detail):
+            return {
+                "detail": "",
+                "article_title": title[:300],
+                "resolved_url": final_url,
+                "detail_status": "aggregator_page",
+            }
+        return {
+            "detail": detail[:1800],
+            "article_title": title[:300],
+            "resolved_url": final_url,
+            "detail_status": "ok" if detail else "empty",
+        }
+    except Exception as exc:
+        return {"detail": "", "detail_status": f"failed: {exc}"[:200]}
+
+
+def build_news_detail_fallback(item: dict[str, str], detail_status: str = "") -> str:
+    rows = [
+        f"标题：{item.get('title', '').strip()}",
+        f"来源：{item.get('source', '').strip() or '未知'}",
+        f"主题：{item.get('tags', '').strip() or '未分类'}",
+    ]
+    if item.get("published_at"):
+        rows.append(f"时间：{item['published_at']}")
+    if item.get("summary"):
+        rows.append(f"摘要：{item['summary']}")
+    rows.append("")
+    rows.append("当前没有解析到原站正文，先用 RSS 可确认信息做讨论基底。")
+    if detail_status:
+        rows.append(f"正文状态：{detail_status}")
+    if item.get("source_url"):
+        rows.append(f"来源站点：{item['source_url']}")
+    if item.get("url"):
+        rows.append(f"聚合链接：{item['url']}")
+    return "\n".join(row for row in rows if row is not None).strip()
+
+
+def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        limit = int(payload.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    limit = min(max(limit, 1), 10)
+    fetched: list[dict[str, str]] = []
+    errors: list[str] = []
+    for feed in NEWS_ALIGNMENT_FEEDS:
+        try:
+            fetched.extend(fetch_rss_feed(feed))
+        except Exception as exc:
+            errors.append(f"{feed['topic']}: {exc}")
+
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in fetched:
+        key = normalize_selfcore_text(item.get("title", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        item["discussion_score"] = str(discussion_score(item))
+        deduped.append(item)
+    deduped.sort(key=lambda item: (-int(item.get("discussion_score") or 0), item.get("published_at", "")))
+    selected: list[dict[str, str]] = []
+    topic_counts: dict[str, int] = {}
+    per_topic_limit = 3
+    for item in deduped:
+        topic = item.get("tags", "")
+        if topic_counts.get(topic, 0) >= per_topic_limit:
+            continue
+        selected.append(item)
+        topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        selected_ids = {item["news_id"] for item in selected}
+        for item in deduped:
+            if item["news_id"] in selected_ids:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+    for item in selected:
+        detail = fetch_article_detail(item.get("url", ""))
+        item.update(detail)
+        if detail.get("detail"):
+            if not item.get("summary") or item["summary"] == item["title"]:
+                item["summary"] = detail["detail"][:1000]
+        else:
+            item["detail"] = build_news_detail_fallback(item, detail.get("detail_status", ""))
+            item["detail_status"] = detail.get("detail_status") or "fallback"
+    if not selected and errors:
+        raise ValueError("news fetch failed: " + " | ".join(errors[:3]))
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "news_items": selected,
+        "fetched_count": len(fetched),
+        "selected_count": len(selected),
+        "errors": errors[:5],
+        "selection_basis": "按可讨论性、分歧可能性、事实完整度和 SelfCore 主题优先级筛选",
+    }
 
 
 def generate_news_alignment(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2188,7 +2505,7 @@ def confirm_news_alignment_candidates(payload: dict[str, Any]) -> dict[str, Any]
         raise ValueError("no confirmed news alignment candidates selected")
 
     NEWS_ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
-    MULTIMODAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    NEWS_ALIGNMENT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     record = {
         "id": record_id,
         "created_at": created_at,
@@ -2198,13 +2515,13 @@ def confirm_news_alignment_candidates(payload: dict[str, Any]) -> dict[str, Any]
     }
     record_path = NEWS_ALIGNMENT_DIR / f"{record_id}.confirm.json"
     record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    with MULTIMODAL_MEMORY_PATH.open("a", encoding="utf-8") as handle:
+    with NEWS_ALIGNMENT_MEMORY_PATH.open("a", encoding="utf-8") as handle:
         for row in memory_rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     return {
         "record_path": str(record_path),
-        "memory_path": str(MULTIMODAL_MEMORY_PATH),
+        "memory_path": str(NEWS_ALIGNMENT_MEMORY_PATH),
         "injected_count": len(memory_rows),
     }
 
@@ -2233,9 +2550,17 @@ def injected_selfcore_candidate_ids() -> set[str]:
 
 
 def load_selfcore_candidate_records() -> list[dict[str, Any]]:
+    return load_selfcore_candidate_records_from_path(MULTIMODAL_MEMORY_PATH, "multimodal")
+
+
+def load_news_alignment_candidate_records() -> list[dict[str, Any]]:
+    return load_selfcore_candidate_records_from_path(NEWS_ALIGNMENT_MEMORY_PATH, "news_alignment")
+
+
+def load_selfcore_candidate_records_from_path(path: Path, pool: str) -> list[dict[str, Any]]:
     injected_ids = injected_selfcore_candidate_ids()
     records = []
-    for item in read_jsonl(MULTIMODAL_MEMORY_PATH):
+    for item in read_jsonl(path):
         if str(item.get("scope") or "") != "self_core_candidate":
             continue
         candidate_id = str(item.get("id") or "").strip()
@@ -2251,14 +2576,33 @@ def load_selfcore_candidate_records() -> list[dict[str, Any]]:
                 "source_type": str(item.get("source_type") or ""),
                 "source_saved_path": str(item.get("source_saved_path") or ""),
                 "analysis_summary": str(item.get("analysis_summary") or ""),
+                "pool": pool,
                 "injected": candidate_id in injected_ids,
             }
         )
     return [item for item in records if item["candidate"]]
 
 
-def list_selfcore_candidates() -> dict[str, Any]:
-    candidates = load_selfcore_candidate_records()
+def normalize_candidate_pool(value: Any) -> str:
+    pool = str(value or "multimodal").strip()
+    return pool if pool in {"multimodal", "news_alignment"} else "multimodal"
+
+
+def selfcore_candidates_for_pool(pool: str) -> list[dict[str, Any]]:
+    if pool == "news_alignment":
+        return load_news_alignment_candidate_records()
+    return load_selfcore_candidate_records()
+
+
+def candidate_pool_memory_path(pool: str) -> Path:
+    if pool == "news_alignment":
+        return NEWS_ALIGNMENT_MEMORY_PATH
+    return MULTIMODAL_MEMORY_PATH
+
+
+def list_selfcore_candidates(pool: str = "multimodal") -> dict[str, Any]:
+    pool = normalize_candidate_pool(pool)
+    candidates = selfcore_candidates_for_pool(pool)
     pending = [item for item in candidates if not item["injected"]]
     counts: dict[str, int] = {}
     for item in pending:
@@ -2268,14 +2612,17 @@ def list_selfcore_candidates() -> dict[str, Any]:
         "pending_count": len(pending),
         "total_count": len(candidates),
         "target_counts": counts,
+        "pool": pool,
+        "memory_path": str(candidate_pool_memory_path(pool)),
         "selfcore_path": str(SELF_CORE_PATH),
         "injection_log_path": str(SELFCORE_INJECTION_LOG_PATH),
     }
 
 
-def selected_selfcore_candidates(candidate_ids: list[Any]) -> list[dict[str, Any]]:
+def selected_selfcore_candidates(candidate_ids: list[Any], pool: str = "multimodal") -> list[dict[str, Any]]:
+    pool = normalize_candidate_pool(pool)
     requested = {str(item) for item in candidate_ids if item}
-    candidates = [item for item in load_selfcore_candidate_records() if not item["injected"]]
+    candidates = [item for item in selfcore_candidates_for_pool(pool) if not item["injected"]]
     if not requested:
         return candidates
     return [item for item in candidates if item["id"] in requested]
@@ -2681,9 +3028,10 @@ def merge_selfcore_candidates(payload: dict[str, Any]) -> dict[str, Any]:
     candidate_ids = payload.get("candidate_ids")
     if not isinstance(candidate_ids, list):
         candidate_ids = []
-    candidates = selected_selfcore_candidates(candidate_ids)
+    pool = normalize_candidate_pool(payload.get("pool"))
+    candidates = selected_selfcore_candidates(candidate_ids, pool)
     if not candidates:
-        raise ValueError("no pending selfcore candidates selected")
+        raise ValueError(f"no pending selfcore candidates selected for pool: {pool}")
 
     api_key = str(payload.get("poe_api_key") or "").strip()
     model = str(payload.get("poe_model") or "GPT-4o").strip()
@@ -2696,6 +3044,7 @@ def merge_selfcore_candidates(payload: dict[str, Any]) -> dict[str, Any]:
     record = {
         "id": record_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "pool": pool,
         "candidate_ids": [item["id"] for item in candidates],
         "candidate_count": len(candidates),
         **merged,
@@ -2916,6 +3265,28 @@ def confirmed_multimodal_memory_excerpt(limit: int = 30) -> str:
         if candidate:
             output.append(f"- [{scope}/{confidence}] {candidate}")
     return "\n".join(output) or "（暂无已确认的多模态记忆）"
+
+
+def confirmed_news_alignment_memory_excerpt(limit: int = 30) -> str:
+    if not NEWS_ALIGNMENT_MEMORY_PATH.exists():
+        return "（暂无已确认的新闻对齐记忆）"
+    lines = NEWS_ALIGNMENT_MEMORY_PATH.read_text(encoding="utf-8").splitlines()
+    records: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    output = []
+    for item in records:
+        target = str(item.get("target") or item.get("scope") or "self_understanding")
+        confidence = str(item.get("confidence") or "medium")
+        candidate = str(item.get("candidate") or "").strip()
+        if candidate:
+            output.append(f"- [{target}/{confidence}] {candidate}")
+    return "\n".join(output) or "（暂无已确认的新闻对齐记忆）"
 
 
 def format_dyadic_profile(profile: dict[str, Any] | None) -> str:
@@ -3327,56 +3698,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "DigitalTwinDashboard/0.1"
 
     def do_GET(self) -> None:
-        if self.path in {"/", "/index.html"}:
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        query = parse_qs(parsed_path.query)
+        if path in {"/", "/index.html"}:
             self.serve_file(DASHBOARD_DIR / "index.html")
             return
-        if self.path == "/multimodal.html":
+        if path == "/multimodal.html":
             self.serve_file(DASHBOARD_DIR / "multimodal.html")
             return
-        if self.path == "/multimodal.js":
+        if path == "/multimodal.js":
             self.serve_file(DASHBOARD_DIR / "multimodal.js")
             return
-        if self.path == "/multimodal.css":
+        if path == "/multimodal.css":
             self.serve_file(DASHBOARD_DIR / "multimodal.css")
             return
-        if self.path == "/selfcore-candidates.html":
+        if path == "/selfcore-candidates.html":
             self.serve_file(DASHBOARD_DIR / "selfcore-candidates.html")
             return
-        if self.path == "/selfcore-candidates.js":
+        if path == "/selfcore-candidates.js":
             self.serve_file(DASHBOARD_DIR / "selfcore-candidates.js")
             return
-        if self.path == "/selfcore-candidates.css":
+        if path == "/selfcore-candidates.css":
             self.serve_file(DASHBOARD_DIR / "selfcore-candidates.css")
             return
-        if self.path == "/news-alignment.html":
+        if path == "/news-alignment.html":
             self.serve_file(DASHBOARD_DIR / "news-alignment.html")
             return
-        if self.path == "/news-alignment.js":
+        if path == "/news-alignment.js":
             self.serve_file(DASHBOARD_DIR / "news-alignment.js")
             return
-        if self.path == "/news-alignment.css":
+        if path == "/news-alignment.css":
             self.serve_file(DASHBOARD_DIR / "news-alignment.css")
             return
-        if self.path == "/app.js":
+        if path == "/app.js":
             self.serve_file(DASHBOARD_DIR / "app.js")
             return
-        if self.path == "/styles.css":
+        if path == "/styles.css":
             self.serve_file(DASHBOARD_DIR / "styles.css")
             return
-        if self.path == "/api/health":
+        if path == "/api/health":
             self.send_json({"ok": True})
             return
-        if self.path == "/api/people":
+        if path == "/api/people":
             self.send_json({"ok": True, "people": list_people()})
             return
-        if self.path == "/api/selfcore-candidates":
-            self.send_json({"ok": True, "result": list_selfcore_candidates()})
+        if path == "/api/selfcore-candidates":
+            pool = normalize_candidate_pool((query.get("pool") or ["multimodal"])[0])
+            self.send_json({"ok": True, "result": list_selfcore_candidates(pool)})
             return
-        if self.path == "/api/speaker-profiles":
+        if path == "/api/news-alignment/fetch":
+            try:
+                result = fetch_discussable_news({"limit": (query.get("limit") or ["10"])[0]})
+                self.send_json({"ok": True, "result": result})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        if path == "/api/speaker-profiles":
             self.send_json({"ok": True, "result": list_speaker_profiles()})
             return
-        if self.path.startswith("/api/multimodal/asr-jobs/"):
-            job_id = self.path.rsplit("/", 1)[-1]
+        if path.startswith("/api/multimodal/asr-jobs/"):
+            job_id = path.rsplit("/", 1)[-1]
             try:
                 self.send_json({"ok": True, "result": get_asr_job(job_id)})
             except Exception as exc:

@@ -17,9 +17,26 @@ const injectPreview = document.querySelector("#injectPreview");
 
 const POE_API_KEY_STORAGE_KEY = "digitalTwin.poeApiKey";
 const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
+const CANDIDATE_POOL = new URLSearchParams(window.location.search).get("pool") === "news_alignment"
+  ? "news_alignment"
+  : "multimodal";
+const POOL_LABELS = {
+  multimodal: "多模态画像候选池",
+  news_alignment: "每日新闻对齐候选池",
+};
 
 let currentCandidates = [];
 let currentProposals = [];
+
+function applyPoolLabels() {
+  const heading = document.querySelector(".topbar h1");
+  const subtitle = document.querySelector(".topbar p");
+  if (CANDIDATE_POOL === "news_alignment") {
+    document.title = "新闻 SelfCore 候选池";
+    if (heading) heading.textContent = "新闻 SelfCore 候选池";
+    if (subtitle) subtitle.textContent = "汇总每日新闻对齐候选，合并特征，最终注入 SelfCore。";
+  }
+}
 
 function restoreSettings() {
   try {
@@ -54,9 +71,13 @@ function renderCandidates() {
   const pending = currentCandidates.filter((item) => !item.injected);
   pendingCount.textContent = String(pending.length);
   totalCount.textContent = String(currentCandidates.length);
-  candidateMeta.textContent = `${pending.length} 条待处理，${currentCandidates.length} 条总候选`;
+  candidateMeta.textContent = `${POOL_LABELS[CANDIDATE_POOL]} · ${pending.length} 条待处理，${currentCandidates.length} 条总候选`;
   if (!currentCandidates.length) {
-    candidateList.appendChild(emptyNode("暂无 SelfCore 候选。先在多模态页确认一些候选。"));
+    const hint =
+      CANDIDATE_POOL === "news_alignment"
+        ? "暂无新闻对齐候选。先在每日新闻对齐页确认一些候选。"
+        : "暂无 SelfCore 候选。先在多模态页确认一些候选。";
+    candidateList.appendChild(emptyNode(hint));
     return;
   }
   for (const item of currentCandidates) {
@@ -174,7 +195,7 @@ async function refreshCandidates() {
   refreshButton.disabled = true;
   candidateMeta.textContent = "正在读取候选池...";
   try {
-    const response = await fetch("/api/selfcore-candidates");
+    const response = await fetch(`/api/selfcore-candidates?pool=${encodeURIComponent(CANDIDATE_POOL)}`);
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "读取失败");
     currentCandidates = data.result?.candidates || [];
@@ -202,6 +223,7 @@ async function mergeSelected() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         candidate_ids: ids,
+        pool: CANDIDATE_POOL,
         use_model: useModelInput.checked,
         poe_api_key: poeApiKeyInput.value.trim(),
         poe_model: poeModelInput.value.trim(),
@@ -267,4 +289,5 @@ poeApiKeyInput.addEventListener("change", cacheSettings);
 poeModelInput.addEventListener("change", cacheSettings);
 
 restoreSettings();
+applyPoolLabels();
 refreshCandidates();
