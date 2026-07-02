@@ -17,6 +17,7 @@ const funasrVadModelInput = document.querySelector("#funasrVadModel");
 const funasrPuncModelInput = document.querySelector("#funasrPuncModel");
 const funasrSpkModelInput = document.querySelector("#funasrSpkModel");
 const funasrBatchSizeInput = document.querySelector("#funasrBatchSize");
+const funasrIdentityThresholdInput = document.querySelector("#funasrIdentityThreshold");
 const funasrHotwordInput = document.querySelector("#funasrHotword");
 const hfTokenInput = document.querySelector("#hfToken");
 const speakerDisplayNameInput = document.querySelector("#speakerDisplayName");
@@ -61,6 +62,7 @@ const FUNASR_VAD_MODEL_STORAGE_KEY = "digitalTwin.funasrVadModel";
 const FUNASR_PUNC_MODEL_STORAGE_KEY = "digitalTwin.funasrPuncModel";
 const FUNASR_SPK_MODEL_STORAGE_KEY = "digitalTwin.funasrSpkModel";
 const FUNASR_BATCH_SIZE_STORAGE_KEY = "digitalTwin.funasrBatchSize";
+const FUNASR_IDENTITY_THRESHOLD_STORAGE_KEY = "digitalTwin.funasrIdentityThreshold";
 const FUNASR_HOTWORD_STORAGE_KEY = "digitalTwin.funasrHotword";
 const HF_TOKEN_STORAGE_KEY = "digitalTwin.hfToken";
 const SPEAKER_DISPLAY_NAME_STORAGE_KEY = "digitalTwin.speakerDisplayName";
@@ -100,6 +102,11 @@ function restoreSettings() {
     funasrPuncModelInput.value = localStorage.getItem(FUNASR_PUNC_MODEL_STORAGE_KEY) || funasrPuncModelInput.value;
     funasrSpkModelInput.value = localStorage.getItem(FUNASR_SPK_MODEL_STORAGE_KEY) || funasrSpkModelInput.value;
     funasrBatchSizeInput.value = localStorage.getItem(FUNASR_BATCH_SIZE_STORAGE_KEY) || funasrBatchSizeInput.value;
+    const storedFunasrIdentityThreshold = localStorage.getItem(FUNASR_IDENTITY_THRESHOLD_STORAGE_KEY) || "";
+    funasrIdentityThresholdInput.value =
+      storedFunasrIdentityThreshold && storedFunasrIdentityThreshold !== "0.72"
+        ? storedFunasrIdentityThreshold
+        : funasrIdentityThresholdInput.value;
     funasrHotwordInput.value = localStorage.getItem(FUNASR_HOTWORD_STORAGE_KEY) || "";
     hfTokenInput.value = localStorage.getItem(HF_TOKEN_STORAGE_KEY) || "";
     speakerDisplayNameInput.value =
@@ -137,6 +144,7 @@ function cacheSettings() {
     const funasrPuncModel = funasrPuncModelInput.value.trim();
     const funasrSpkModel = funasrSpkModelInput.value.trim();
     const funasrBatchSize = funasrBatchSizeInput.value.trim();
+    const funasrIdentityThreshold = funasrIdentityThresholdInput.value.trim();
     const funasrHotword = funasrHotwordInput.value.trim();
     if (asrProvider) localStorage.setItem(ASR_PROVIDER_STORAGE_KEY, asrProvider);
     if (volcengineAppId) localStorage.setItem(VOLCENGINE_APP_ID_STORAGE_KEY, volcengineAppId);
@@ -151,6 +159,7 @@ function cacheSettings() {
     if (funasrPuncModel) localStorage.setItem(FUNASR_PUNC_MODEL_STORAGE_KEY, funasrPuncModel);
     if (funasrSpkModel) localStorage.setItem(FUNASR_SPK_MODEL_STORAGE_KEY, funasrSpkModel);
     if (funasrBatchSize) localStorage.setItem(FUNASR_BATCH_SIZE_STORAGE_KEY, funasrBatchSize);
+    if (funasrIdentityThreshold) localStorage.setItem(FUNASR_IDENTITY_THRESHOLD_STORAGE_KEY, funasrIdentityThreshold);
     if (funasrHotword) localStorage.setItem(FUNASR_HOTWORD_STORAGE_KEY, funasrHotword);
     else localStorage.removeItem(FUNASR_HOTWORD_STORAGE_KEY);
     const hfToken = hfTokenInput.value.trim();
@@ -1045,6 +1054,7 @@ async function runDiarizedAsr() {
         funasr_punc_model: funasrPuncModelInput.value.trim(),
         funasr_spk_model: funasrSpkModelInput.value.trim(),
         funasr_batch_size_s: Number(funasrBatchSizeInput.value || 300),
+        speaker_identity_threshold: Number(funasrIdentityThresholdInput.value || 0.72),
         funasr_hotword: funasrHotwordInput.value.trim(),
       }),
     });
@@ -1127,6 +1137,8 @@ funasrSpkModelInput.addEventListener("change", cacheSettings);
 funasrSpkModelInput.addEventListener("blur", cacheSettings);
 funasrBatchSizeInput.addEventListener("change", cacheSettings);
 funasrBatchSizeInput.addEventListener("blur", cacheSettings);
+funasrIdentityThresholdInput.addEventListener("change", cacheSettings);
+funasrIdentityThresholdInput.addEventListener("blur", cacheSettings);
 funasrHotwordInput.addEventListener("change", cacheSettings);
 funasrHotwordInput.addEventListener("blur", cacheSettings);
 hfTokenInput.addEventListener("change", cacheSettings);

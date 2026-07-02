@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>每日新闻对齐</title>
+    <link rel="stylesheet" href="/news-alignment.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>每日新闻对齐</h1>
+          <p>用 10 条新闻和数字“我”校对判断，再沉淀 SelfCore 候选。</p>
+        </div>
+        <nav class="nav">
+          <a href="/">关系页</a>
+          <a href="/selfcore-candidates.html">SelfCore 候选</a>
+          <a href="/multimodal.html">多模态摄入</a>
+        </nav>
+      </header>
+
+      <section class="panel settings">
+        <label>
+          <span>Poe API Key</span>
+          <input id="poeApiKey" type="password" autocomplete="off" placeholder="pkey-..." />
+        </label>
+        <label>
+          <span>模型</span>
+          <input id="poeModel" autocomplete="off" value="GPT-4o" />
+        </label>
+      </section>
+
+      <section class="workspace">
+        <section class="panel input-panel">
+          <div class="panel-head">
+            <div>
+              <h2>输入新闻</h2>
+              <p>粘贴 10 条新闻。每条一行，或用空行分隔标题和摘要。</p>
+            </div>
+          </div>
+          <label>
+            <span>今日新闻</span>
+            <textarea id="newsText" rows="14" placeholder="1. 标题 / 摘要 / 来源&#10;2. 标题 / 摘要 / 来源"></textarea>
+          </label>
+          <label>
+            <span>我的校对、补充或改写</span>
+            <textarea id="userAlignment" rows="6" placeholder="比如：这条我不关心；这条我的重点不是政策本身，而是激励怎么变；某个判断太确定了。"></textarea>
+          </label>
+          <div class="actions">
+            <button type="button" class="ghost" id="clearButton">清空</button>
+            <button type="button" id="analyzeButton">生成对齐分析</button>
+          </div>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-head">
+            <div>
+              <h2>数字“我”的初判</h2>
+              <p id="resultMeta">等待输入</p>
+            </div>
+          </div>
+          <pre id="analysisText">分析结果会显示在这里。</pre>
+        </section>
+
+        <section class="panel confirm-panel">
+          <div class="panel-head">
+            <div>
+              <h2>SelfCore 候选</h2>
+              <p id="confirmMeta">只写入你勾选确认的候选。</p>
+            </div>
+          </div>
+          <div id="candidateList" class="candidate-list"></div>
+          <button type="button" id="confirmButton">确认写入候选池</button>
+        </section>
+      </section>
+    </main>
+    <script src="/news-alignment.js"></script>
+  </body>
+</html>

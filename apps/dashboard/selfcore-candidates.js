@@ -210,7 +210,10 @@ async function mergeSelected() {
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "合并失败");
     currentProposals = data.result?.proposals || [];
-    proposalMeta.textContent = `${data.result?.engine || "local"} · ${data.result?.candidate_count || ids.length} 条候选`;
+    const candidateCount = data.result?.candidate_count || ids.length;
+    const clusterCount = data.result?.cluster_count ?? currentProposals.length;
+    const dedupedCount = data.result?.deduped_count ?? Math.max(0, candidateCount - clusterCount);
+    proposalMeta.textContent = `${data.result?.engine || "local"} · ${candidateCount} 条候选 → ${clusterCount} 条提案，压缩 ${dedupedCount} 条相近候选`;
     renderProposals();
   } catch (error) {
     proposalMeta.textContent = `合并失败：${error.message}`;

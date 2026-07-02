@@ -5,6 +5,8 @@
 当前版本：
 
 - [CommunicationPolicy v0.1](CommunicationPolicy.v0.1.md)
+- [OutboundCommunicationPolicy v0.1](OutboundCommunicationPolicy.v0.1.md)
+- [NewsAlignmentPolicy v0.1](../self-alignment/NewsAlignmentPolicy.v0.1.md)
 - [Schema](schema.md)
 - [评估用例](../../evals/cases/communication-policy-v0.1.md)
 
@@ -16,4 +18,4 @@
 
 ## 默认原则
 
-先做草稿，不自动发送。
+先做草稿，不自动发送。对外沟通策略和每日新闻对齐/自我蒸馏策略分开维护。

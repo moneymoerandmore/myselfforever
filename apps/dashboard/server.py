@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import csv
 from datetime import date
+from difflib import SequenceMatcher
 import importlib.util
 import json
 import math
@@ -34,6 +35,7 @@ MULTIMODAL_INTAKE_DIR = ROOT / "data" / "generated" / "multimodal-intake"
 MULTIMODAL_ASR_DIR = ROOT / "data" / "generated" / "multimodal-asr"
 MULTIMODAL_DIARIZED_ASR_DIR = ROOT / "data" / "generated" / "multimodal-diarized-asr"
 MULTIMODAL_CONFIRM_DIR = ROOT / "data" / "generated" / "multimodal-confirmations"
+NEWS_ALIGNMENT_DIR = ROOT / "data" / "generated" / "news-alignment"
 MULTIMODAL_MEMORY_DIR = ROOT / "runtime" / "multimodal-memory"
 MULTIMODAL_MEMORY_PATH = MULTIMODAL_MEMORY_DIR / "confirmed-features.jsonl"
 SPEAKER_PROFILE_DIR = ROOT / "runtime" / "speaker-profiles"
@@ -1413,20 +1415,34 @@ def normalize_funasr_speaker(value: Any, fallback_index: int) -> str:
     return text
 
 
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def funasr_time_seconds(value: Any) -> float:
+    try:
+        return float(value or 0) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def normalize_funasr_segment(raw: dict[str, Any], fallback_index: int) -> dict[str, Any]:
     text = str(raw.get("text") or raw.get("sentence") or raw.get("onebest") or "").strip()
     timestamp = raw.get("timestamp") or raw.get("time_stamp")
-    start = numeric_time_seconds(raw.get("start") or raw.get("begin") or raw.get("start_time"))
-    end = numeric_time_seconds(raw.get("end") or raw.get("stop") or raw.get("end_time"))
+    start = funasr_time_seconds(first_present(raw.get("start"), raw.get("begin"), raw.get("start_time")))
+    end = funasr_time_seconds(first_present(raw.get("end"), raw.get("stop"), raw.get("end_time")))
     if isinstance(timestamp, list) and timestamp:
         first = timestamp[0]
         last = timestamp[-1]
         if isinstance(first, list) and first:
-            start = numeric_time_seconds(first[0])
+            start = funasr_time_seconds(first[0])
         if isinstance(last, list) and len(last) > 1:
-            end = numeric_time_seconds(last[1])
+            end = funasr_time_seconds(last[1])
     speaker = normalize_funasr_speaker(
-        raw.get("spk") or raw.get("speaker") or raw.get("speaker_id"),
+        first_present(raw.get("spk"), raw.get("speaker"), raw.get("speaker_id")),
         fallback_index,
     )
     return {
@@ -1446,7 +1462,139 @@ def funasr_result_items(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+def representative_segments(segments: list[dict[str, Any]], limit: int = 4) -> list[dict[str, Any]]:
+    useful = [
+        segment
+        for segment in segments
+        if float(segment.get("end") or 0) - float(segment.get("start") or 0) >= 0.8
+    ]
+    return sorted(
+        useful or segments,
+        key=lambda segment: float(segment.get("end") or 0) - float(segment.get("start") or 0),
+        reverse=True,
+    )[:limit]
+
+
+def average_embedding(vectors: list[list[float]]) -> list[float]:
+    vectors = [vector for vector in vectors if vector]
+    if not vectors:
+        return []
+    size = min(len(vector) for vector in vectors)
+    averaged = [sum(vector[index] for vector in vectors) / len(vectors) for index in range(size)]
+    return normalize_embedding(averaged)
+
+
+def speaker_identity_bindings(source_path: Path, segments: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
+    profile_payload = speaker_profiles_payload()
+    profiles = [profile for profile in profile_payload.get("profiles", []) if profile.get("embedding")]
+    if not profiles or not segments:
+        return {"speaker_name_map": {}, "identity_map": {}, "status": "skipped", "reason": "no_profiles_or_segments"}
+
+    token = hf_token_from_payload(payload)
+    threshold = float(
+        payload.get("speaker_identity_threshold")
+        or os.environ.get("DIGITAL_TWIN_FUNASR_IDENTITY_THRESHOLD", "0.30")
+    )
+    max_crop_seconds = float(payload.get("speaker_identity_max_crop_seconds") or 20)
+    try:
+        audio_source = pyannote_audio_source(source_path)
+    except Exception as exc:
+        return {"speaker_name_map": {}, "identity_map": {}, "status": "failed", "reason": str(exc)}
+
+    candidates: list[dict[str, Any]] = []
+    speaker_scores: list[dict[str, Any]] = []
+    speaker_values = sorted({str(segment["raw_speaker"]) for segment in segments})
+    for speaker in speaker_values:
+        speaker_segments = [segment for segment in segments if str(segment["raw_speaker"]) == speaker]
+        vectors: list[list[float]] = []
+        sampled: list[dict[str, Any]] = []
+        for segment in representative_segments(speaker_segments):
+            start = float(segment.get("start") or 0)
+            end = float(segment.get("end") or start)
+            if end <= start:
+                continue
+            crop_end = min(end, start + max_crop_seconds)
+            try:
+                vectors.append(audio_embedding(audio_source, token, start, crop_end))
+                sampled.append({"start": round(start, 2), "end": round(crop_end, 2)})
+            except Exception:
+                continue
+        embedding = average_embedding(vectors)
+        scored_profiles = [
+            {
+                "id": profile.get("id"),
+                "display_name": profile.get("display_name"),
+                "role": profile.get("role"),
+                "score": round(cosine_similarity(embedding, [float(item) for item in profile.get("embedding") or []]), 4),
+            }
+            for profile in profiles
+        ]
+        scored_profiles.sort(key=lambda item: float(item["score"]), reverse=True)
+        speaker_scores.append(
+            {
+                "speaker": speaker,
+                "duration": round(sum(max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0)) for segment in speaker_segments), 2),
+                "turn_count": len(speaker_segments),
+                "sampled_segments": sampled,
+                "scores": scored_profiles,
+            }
+        )
+        identity = scored_profiles[0] if scored_profiles and float(scored_profiles[0]["score"]) >= threshold else None
+        if identity:
+            candidates.append(
+                {
+                    "speaker": speaker,
+                    "identity": identity,
+                    "score": float(identity.get("score") or 0),
+                    "sampled_segments": sampled,
+                }
+            )
+
+    identity_map: dict[str, dict[str, Any]] = {}
+    speaker_name_map: dict[str, str] = {}
+    used_profile_ids: set[str] = set()
+    for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
+        identity = candidate["identity"]
+        profile_id = str(identity.get("id") or "")
+        if profile_id in used_profile_ids:
+            continue
+        used_profile_ids.add(profile_id)
+        speaker = str(candidate["speaker"])
+        identity_map[speaker] = {
+            **identity,
+            "sampled_segments": candidate["sampled_segments"],
+        }
+        speaker_name_map[speaker] = str(identity.get("display_name") or speaker)
+    return {
+        "speaker_name_map": speaker_name_map,
+        "identity_map": identity_map,
+        "status": "completed",
+        "threshold": threshold,
+        "candidate_count": len(candidates),
+        "bound_count": len(identity_map),
+        "speaker_scores": speaker_scores,
+    }
+
+
+def summarize_segments_speakers(segments: list[dict[str, Any]], identity_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    speakers: list[dict[str, Any]] = []
+    for speaker in sorted({str(segment["raw_speaker"]) for segment in segments}):
+        speaker_segments = [segment for segment in segments if str(segment["raw_speaker"]) == speaker]
+        duration = sum(max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0)) for segment in speaker_segments)
+        identity = identity_map.get(speaker)
+        speakers.append(
+            {
+                "speaker": speaker,
+                "display_name": identity["display_name"] if identity else speaker,
+                "duration": round(duration, 2),
+                "turn_count": len(speaker_segments),
+                "identity": identity,
+            }
+        )
+    return speakers
+
+
+def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     segments: list[dict[str, Any]] = []
     text_parts: list[str] = []
     for item in funasr_result_items(raw):
@@ -1472,19 +1620,14 @@ def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any])
             }
         )
 
-    speakers: list[dict[str, Any]] = []
-    for speaker in sorted({segment["speaker"] for segment in segments}):
-        speaker_segments = [segment for segment in segments if segment["speaker"] == speaker]
-        duration = sum(max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0)) for segment in speaker_segments)
-        speakers.append(
-            {
-                "speaker": speaker,
-                "display_name": speaker,
-                "duration": round(duration, 2),
-                "turn_count": len(speaker_segments),
-                "identity": None,
-            }
-        )
+    identity_binding = speaker_identity_bindings(source_path, segments, payload)
+    speaker_name_map = identity_binding.get("speaker_name_map") or {}
+    identity_map = identity_binding.get("identity_map") or {}
+    for segment in segments:
+        raw_speaker = str(segment.get("raw_speaker") or segment.get("speaker") or "")
+        segment["speaker"] = speaker_name_map.get(raw_speaker, raw_speaker)
+
+    speakers = summarize_segments_speakers(segments, identity_map)
 
     lines = [
         f"[{format_timestamp(float(segment['start']))}-{format_timestamp(float(segment['end']))}] "
@@ -1511,6 +1654,7 @@ def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any])
         "spk_model": config["spk_model"],
         "speakers": speakers,
         "segments": segments,
+        "identity_binding": identity_binding,
         "transcript_path": str(txt_path),
         "raw_result": raw,
     }
@@ -1519,6 +1663,7 @@ def normalize_funasr_result(raw: Any, source_path: Path, config: dict[str, Any])
         "text": transcript,
         "segments": segments,
         "speakers": speakers,
+        "identity_binding": identity_binding,
         "diarization_turns": [
             {"start": segment["start"], "end": segment["end"], "speaker": segment["raw_speaker"]}
             for segment in segments
@@ -1551,7 +1696,7 @@ def call_funasr_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
         raw_result = model.generate(**generate_kwargs)
     except FileNotFoundError as exc:
         raise ValueError(f"FunASR 调用外部解码工具失败，通常是 ffmpeg 不可用；原始错误：{exc}") from exc
-    return normalize_funasr_result(raw_result, source_path, config)
+    return normalize_funasr_result(raw_result, source_path, config, payload)
 
 
 def call_diarized_asr(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1837,6 +1982,233 @@ def confirm_multimodal_candidates(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, str]]:
+    raw_items = payload.get("news_items")
+    items: list[dict[str, str]] = []
+    if isinstance(raw_items, list):
+        for index, item in enumerate(raw_items[:10], start=1):
+            if isinstance(item, dict):
+                title = str(item.get("title") or item.get("headline") or "").strip()
+                summary = str(item.get("summary") or item.get("content") or "").strip()
+                source = str(item.get("source") or item.get("url") or "").strip()
+                published_at = str(item.get("published_at") or item.get("date") or "").strip()
+                tags = item.get("tags")
+                tag_text = ", ".join(str(tag) for tag in tags[:8]) if isinstance(tags, list) else str(tags or "").strip()
+            else:
+                title = str(item or "").strip()
+                summary = ""
+                source = ""
+                published_at = ""
+                tag_text = ""
+            if title or summary:
+                items.append(
+                    {
+                        "news_id": str(item.get("news_id") or f"news-{index}") if isinstance(item, dict) else f"news-{index}",
+                        "title": title[:300],
+                        "summary": summary[:1200],
+                        "source": source[:500],
+                        "published_at": published_at[:80],
+                        "tags": tag_text[:200],
+                    }
+                )
+
+    news_text = str(payload.get("news_text") or "").strip()
+    if not items and news_text:
+        chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n+", news_text) if chunk.strip()]
+        if len(chunks) <= 1:
+            chunks = [chunk.strip() for chunk in news_text.splitlines() if chunk.strip()]
+        for index, chunk in enumerate(chunks[:10], start=1):
+            lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+            title = lines[0] if lines else chunk
+            summary = "\n".join(lines[1:]) if len(lines) > 1 else ""
+            items.append(
+                {
+                    "news_id": f"news-{index}",
+                    "title": title[:300],
+                    "summary": summary[:1200],
+                    "source": "",
+                    "published_at": "",
+                    "tags": "",
+                }
+            )
+    return items[:10]
+
+
+def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment: str) -> str:
+    news_lines = []
+    for item in news_items:
+        news_lines.append(
+            "\n".join(
+                [
+                    f"- id: {item['news_id']}",
+                    f"  title: {item['title']}",
+                    f"  summary: {item['summary'] or '（无摘要）'}",
+                    f"  source: {item['source'] or '（未提供）'}",
+                    f"  published_at: {item['published_at'] or '（未提供）'}",
+                    f"  tags: {item['tags'] or '（未提供）'}",
+                ]
+            )
+        )
+    return f"""当前日期是 {date.today().isoformat()}。你是数字“我”的每日新闻对齐器。
+目标不是写新闻摘要，也不是对外发消息，而是帮助数字“我”和用户本人围绕每日 10 条新闻校准三观、判断方式、表达力度和近期关注点。
+
+现有 SelfCore 摘要：
+{self_core_excerpt()}
+
+已确认的候选记忆摘要：
+{confirmed_multimodal_memory_excerpt()}
+
+今日新闻候选：
+{chr(10).join(news_lines)}
+
+用户校对/补充/改写意见：
+{user_alignment or '（暂无，先生成数字“我”的初判和需要校对的问题）'}
+
+请只输出 JSON，不要 Markdown，不要解释。结构如下：
+{{
+  "daily_summary": "今天 10 条新闻整体对用户画像有什么对齐价值",
+  "selected_news": [
+    {{
+      "news_id": "news-1",
+      "title": "新闻标题",
+      "fact_summary": "只复述已给定事实，不补外部事实",
+      "why_user_may_care": "为什么用户可能关心",
+      "first_reaction": "数字“我”按当前 SelfCore 的第一反应",
+      "judgment_frame": "使用了什么判断框架",
+      "uncertainties": ["事实不足或不能下结论的点"],
+      "questions_for_user": ["最值得问用户确认的问题"],
+      "can_discuss_with": ["可聊对象类型或空数组"],
+      "not_for": ["不适合聊给谁或空数组"],
+      "long_term_update": "none|short_term|self_core_candidate"
+    }}
+  ],
+  "calibration_candidates": [
+    {{
+      "candidate": "只有在用户确认后才可进入 SelfCore 候选池的中文候选",
+      "target": "self_understanding|thinking_style|expression_style|communication_style|daily_topic|boundary|relationship_context",
+      "confidence": "low|medium|high",
+      "source_news_ids": ["news-1"],
+      "evidence": "来自哪条新闻和哪段用户校对",
+      "needs_user_confirmation": true
+    }}
+  ],
+  "rejected_or_risky": ["不应沉淀的判断或风险"],
+  "outbound_topic_signals": ["可交给对外主动沟通策略重新评估的话题信号"],
+  "questions_for_user": ["跨新闻层面的校对问题"]
+}}
+
+硬规则：
+- 不得使用模型旧知识补齐新闻事实；只能基于输入新闻和用户补充。
+- 二手新闻只进入候选判断，不进入确定结论。
+- 如果用户没有明确确认，`calibration_candidates.needs_user_confirmation` 必须为 true。
+- 候选要写成“用户的判断方式/关注点/表达边界”，不要写成新闻本身。
+- 区分短期关注和长期 SelfCore；单日兴趣波动优先标为 `daily_topic` 或 `short_term`。
+- 投资、医疗、法律、冲突和具体人评价不得写成确定性建议。
+"""
+
+
+def generate_news_alignment(payload: dict[str, Any]) -> dict[str, Any]:
+    news_items = normalize_news_alignment_items(payload)
+    if not news_items:
+        raise ValueError("news_items or news_text is required")
+    api_key = str(payload.get("poe_api_key") or "").strip()
+    if not api_key:
+        raise ValueError("poe_api_key is required for news alignment")
+    model = str(payload.get("poe_model") or "GPT-4o").strip()
+    user_alignment = str(payload.get("user_alignment") or payload.get("discussion_notes") or "").strip()
+    prompt = build_news_alignment_prompt(news_items, user_alignment)
+    text, error_message = call_poe_model(
+        prompt,
+        api_key,
+        model,
+        system_prompt="你是严格的每日新闻对齐器，只输出合法 JSON；不得用外部记忆补新闻事实。",
+        temperature=0.2,
+    )
+    if not text:
+        raise ValueError(error_message or "news alignment model returned no result")
+    parsed = parse_json_object(text)
+    if parsed is None:
+        raise ValueError("news alignment model output is not valid JSON")
+
+    record_id = f"news-align-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    record = {
+        "id": record_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "news_items": news_items,
+        "user_alignment": user_alignment,
+        "analysis": parsed,
+        "raw_model_text": text,
+    }
+    NEWS_ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
+    record_path = NEWS_ALIGNMENT_DIR / f"{record_id}.json"
+    record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "id": record_id,
+        "saved_path": str(record_path),
+        "news_count": len(news_items),
+        **parsed,
+    }
+
+
+def confirm_news_alignment_candidates(payload: dict[str, Any]) -> dict[str, Any]:
+    confirmations = payload.get("confirmations")
+    if not isinstance(confirmations, list):
+        confirmations = []
+    source_saved_path = str(payload.get("source_saved_path") or "").strip()
+    analysis_summary = str(payload.get("analysis_summary") or "").strip()
+    record_id = f"nac-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    created_at = datetime.now().isoformat(timespec="seconds")
+
+    memory_rows: list[dict[str, Any]] = []
+    normalized_confirmations: list[dict[str, Any]] = []
+    for item in confirmations:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("candidate") or "").strip()
+        if not candidate:
+            continue
+        row = {
+            "id": f"{record_id}-f{len(memory_rows) + 1}",
+            "created_at": created_at,
+            "candidate": candidate[:2000],
+            "scope": "self_core_candidate",
+            "confidence": normalize_confirmed_confidence(str(item.get("confidence") or "")),
+            "target": str(item.get("target") or "self_understanding").strip(),
+            "source_type": "daily_news_alignment",
+            "source_saved_path": source_saved_path,
+            "analysis_summary": analysis_summary[:600],
+            "source_news_ids": [str(value) for value in item.get("source_news_ids") or [] if value],
+            "evidence": str(item.get("evidence") or "").strip()[:1000],
+            "confirmed_by_user": True,
+        }
+        memory_rows.append(row)
+        normalized_confirmations.append(row)
+
+    if not memory_rows:
+        raise ValueError("no confirmed news alignment candidates selected")
+
+    NEWS_ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
+    MULTIMODAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": record_id,
+        "created_at": created_at,
+        "source_saved_path": source_saved_path,
+        "analysis_summary": analysis_summary,
+        "confirmations": normalized_confirmations,
+    }
+    record_path = NEWS_ALIGNMENT_DIR / f"{record_id}.confirm.json"
+    record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    with MULTIMODAL_MEMORY_PATH.open("a", encoding="utf-8") as handle:
+        for row in memory_rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return {
+        "record_path": str(record_path),
+        "memory_path": str(MULTIMODAL_MEMORY_PATH),
+        "injected_count": len(memory_rows),
+    }
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -1909,34 +2281,330 @@ def selected_selfcore_candidates(candidate_ids: list[Any]) -> list[dict[str, Any
     return [item for item in candidates if item["id"] in requested]
 
 
-def local_selfcore_merge(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in candidates:
-        grouped.setdefault(str(item.get("target") or "self_understanding"), []).append(item)
+SELFCORE_TARGET_SECTIONS = {
+    "self_understanding": "世界观与判断方式",
+    "thinking_style": "心智模型与决策启发式",
+    "expression_style": "表达 DNA",
+    "communication_style": "沟通习惯",
+    "relationship_context": "关系与互动模式",
+    "social_interaction": "关系与互动模式",
+    "daily_topic": "近期状态与话题",
+    "boundary": "边界与反模式",
+    "anti_pattern": "边界与反模式",
+}
 
+SELFCORE_CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def selfcore_section_for_target(target: str) -> str:
+    normalized = str(target or "self_understanding").strip()
+    return SELFCORE_TARGET_SECTIONS.get(normalized, normalized.replace("_", " ") or "SelfCore 候选")
+
+
+def normalize_selfcore_text(text: Any) -> str:
+    normalized = str(text or "").lower()
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", normalized)
+    return normalized
+
+
+def selfcore_ngrams(text: str) -> set[str]:
+    normalized = normalize_selfcore_text(text)
+    if not normalized:
+        return set()
+    grams: set[str] = set()
+    for size in (2, 3, 4):
+        if len(normalized) >= size:
+            grams.update(normalized[index : index + size] for index in range(len(normalized) - size + 1))
+    if not grams:
+        grams.add(normalized)
+    return grams
+
+
+def selfcore_keywords(text: str) -> set[str]:
+    raw = str(text or "").lower()
+    words = set(re.findall(r"[a-z0-9_]{3,}", raw))
+    cjk = re.findall(r"[\u4e00-\u9fff]{2,}", raw)
+    stop_phrases = {
+        "我会",
+        "我的",
+        "我是",
+        "倾向",
+        "通常",
+        "时候",
+        "比较",
+        "一个",
+        "这种",
+        "这个",
+        "就是",
+        "可以",
+        "需要",
+    }
+    for chunk in cjk:
+        for size in (2, 3):
+            if len(chunk) >= size:
+                words.update(chunk[index : index + size] for index in range(len(chunk) - size + 1))
+    return {word for word in words if word not in stop_phrases}
+
+
+def selfcore_text_similarity(left: Any, right: Any) -> float:
+    left_text = normalize_selfcore_text(left)
+    right_text = normalize_selfcore_text(right)
+    if not left_text or not right_text:
+        return 0.0
+    if left_text == right_text:
+        return 1.0
+    shorter, longer = sorted((left_text, right_text), key=len)
+    if len(shorter) >= 8 and shorter in longer:
+        return 0.94
+
+    left_grams = selfcore_ngrams(left_text)
+    right_grams = selfcore_ngrams(right_text)
+    overlap = len(left_grams & right_grams)
+    union = len(left_grams | right_grams) or 1
+    jaccard = overlap / union
+    contain_score = overlap / max(1, min(len(left_grams), len(right_grams)))
+    left_keywords = selfcore_keywords(str(left or ""))
+    right_keywords = selfcore_keywords(str(right or ""))
+    keyword_overlap = len(left_keywords & right_keywords)
+    keyword_score = keyword_overlap / max(1, min(len(left_keywords), len(right_keywords)))
+    sequence_score = SequenceMatcher(None, left_text, right_text).ratio()
+    return max(jaccard, contain_score * 0.82, keyword_score * 0.9, sequence_score * 0.72)
+
+
+def candidate_text_for_merge(item: dict[str, Any]) -> str:
+    return str(item.get("candidate") or item.get("merged_feature") or item.get("patch_text") or "").strip()
+
+
+def compact_selfcore_text(text: str, limit: int = 420) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip("，,；;。 ") + "。"
+
+
+def split_selfcore_clauses(text: str) -> list[str]:
+    clauses = []
+    for part in re.split(r"[\n。；;]+", str(text or "")):
+        part = re.sub(r"^[\-\*\d\.\s、]+", "", part).strip(" ，,")
+        if len(part) >= 4:
+            clauses.append(part)
+    return clauses
+
+
+def selfcore_confidence_value(value: Any) -> int:
+    return SELFCORE_CONFIDENCE_RANK.get(normalize_confirmed_confidence(str(value or "medium")), 2)
+
+
+def aggregate_selfcore_confidence(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "medium"
+    scores = [selfcore_confidence_value(item.get("confidence")) for item in items]
+    if max(scores) >= 3 and (len(items) >= 2 or sum(scores) >= 5):
+        return "high"
+    if max(scores) >= 2 or len(items) >= 2:
+        return "medium"
+    return "low"
+
+
+def synthesize_selfcore_feature(items: list[dict[str, Any]], limit: int = 420) -> str:
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            -selfcore_confidence_value(item.get("confidence")),
+            abs(len(candidate_text_for_merge(item)) - 90),
+        ),
+    )
+    chosen: list[str] = []
+    for item in ordered:
+        text = candidate_text_for_merge(item)
+        for clause in split_selfcore_clauses(text) or [text]:
+            clause = compact_selfcore_text(clause, 180)
+            if not clause:
+                continue
+            if any(selfcore_text_similarity(clause, existing) >= 0.31 for existing in chosen):
+                continue
+            chosen.append(clause)
+            if len(chosen) >= 3:
+                break
+        if len(chosen) >= 3:
+            break
+    if not chosen:
+        return ""
+    merged = "；".join(chosen)
+    if not re.search(r"[。.!?！？]$", merged):
+        merged += "。"
+    return compact_selfcore_text(merged, limit)
+
+
+def selfcore_proposal_title(section: str, feature: str) -> str:
+    snippet = re.sub(r"\s+", "", feature or "")
+    snippet = re.sub(r"[。；;，,].*$", "", snippet)
+    snippet = snippet[:24] or "候选合并特征"
+    return f"{section}：{snippet}"
+
+
+def best_selfcore_section(items: list[dict[str, Any]], fallback: str) -> str:
+    combined_text = " ".join(candidate_text_for_merge(item) for item in items)
+    if re.search(r"家人|孩子|儿童|互动|沟通|对话|态度|关系|别人|对方", combined_text):
+        return "关系与互动模式"
+    if re.search(r"表达|短句|反问|语气|幽默|吐槽|措辞|说话|连续", combined_text):
+        return "表达 DNA"
+    if re.search(r"目标|资源|系统|结构|判断|拆解|决策|执行|链路|对齐|激励", combined_text):
+        return "心智模型与决策启发式"
+
+    section_scores: dict[str, int] = {}
+    for item in items:
+        section = selfcore_section_for_target(str(item.get("target") or item.get("section") or fallback))
+        section_scores[section] = section_scores.get(section, 0) + selfcore_confidence_value(item.get("confidence"))
+    if section_scores:
+        return sorted(section_scores.items(), key=lambda pair: (-pair[1], pair[0]))[0][0]
+    return fallback
+
+
+def cluster_selfcore_items(
+    items: list[dict[str, Any]],
+    *,
+    text_getter=candidate_text_for_merge,
+    section_getter=lambda item: selfcore_section_for_target(str(item.get("target") or item.get("section") or "")),
+    threshold: float = 0.31,
+    cross_section_threshold: float = 0.56,
+) -> list[dict[str, Any]]:
+    clusters: list[dict[str, Any]] = []
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            section_getter(item),
+            -selfcore_confidence_value(item.get("confidence")),
+            str(item.get("created_at") or ""),
+        ),
+    )
+    for item in ordered:
+        item_text = text_getter(item)
+        if not item_text:
+            continue
+        section = section_getter(item)
+        best_cluster = None
+        best_score = 0.0
+        for cluster in clusters:
+            score = max(selfcore_text_similarity(item_text, text_getter(existing)) for existing in cluster["items"])
+            needed = threshold if cluster["section"] == section else cross_section_threshold
+            if score < needed:
+                continue
+            if score > best_score:
+                best_cluster = cluster
+                best_score = score
+        if best_cluster is not None:
+            best_cluster["items"].append(item)
+            best_cluster["section"] = best_selfcore_section(best_cluster["items"], best_cluster["section"])
+            best_cluster["max_similarity"] = max(best_cluster.get("max_similarity", 0.0), best_score)
+        else:
+            clusters.append({"section": section, "items": [item], "max_similarity": 1.0})
+    return clusters
+
+
+def unique_candidate_ids(items: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        raw_ids = item.get("candidate_ids") if isinstance(item.get("candidate_ids"), list) else [item.get("id")]
+        for value in raw_ids:
+            candidate_id = str(value or "").strip()
+            if candidate_id and candidate_id not in seen:
+                ids.append(candidate_id)
+                seen.add(candidate_id)
+    return ids
+
+
+def local_selfcore_merge(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    clusters = cluster_selfcore_items(candidates)
     proposals = []
-    for target, items in grouped.items():
-        priority = {"high": 0, "medium": 1, "low": 2}
-        chosen = sorted(items, key=lambda item: priority.get(str(item.get("confidence")), 3))[:8]
-        candidate_ids = [str(item["id"]) for item in chosen]
-        lines = [f"- {item['candidate']}" for item in chosen]
-        proposal_text = "\n".join(lines)
+    for cluster in clusters:
+        items = cluster["items"]
+        section = best_selfcore_section(items, cluster["section"])
+        feature = synthesize_selfcore_feature(items)
+        if not feature:
+            continue
+        candidate_ids = unique_candidate_ids(items)
         proposals.append(
             {
                 "id": f"proposal-{len(proposals) + 1}",
-                "section": target,
-                "title": target.replace("_", " "),
-                "merged_feature": proposal_text,
+                "section": section,
+                "title": selfcore_proposal_title(section, feature),
+                "merged_feature": feature,
                 "candidate_ids": candidate_ids,
-                "confidence": "medium" if len(chosen) < 3 else "high",
-                "patch_text": proposal_text,
+                "confidence": aggregate_selfcore_confidence(items),
+                "patch_text": f"- {feature}",
+                "merge_reason": f"语义聚类合并 {len(items)} 条候选",
             }
         )
     return {
-        "engine": "local",
+        "engine": "local_semantic_cluster",
         "proposals": proposals,
         "questions": [],
+        "cluster_count": len(proposals),
+        "deduped_count": max(0, len(candidates) - len(proposals)),
     }
+
+
+def postprocess_selfcore_proposals(
+    proposals: list[Any],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidate_by_id = {str(item.get("id")): item for item in candidates}
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(proposals):
+        if not isinstance(item, dict):
+            continue
+        candidate_ids = [str(value) for value in item.get("candidate_ids") or [] if value]
+        if not candidate_ids:
+            continue
+        section = str(item.get("section") or "").strip()
+        if not section:
+            first = candidate_by_id.get(candidate_ids[0])
+            section = selfcore_section_for_target(str(first.get("target") if first else "self_understanding"))
+        feature = compact_selfcore_text(str(item.get("merged_feature") or item.get("patch_text") or "").strip())
+        if not feature:
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"proposal-{index + 1}"),
+                "section": section,
+                "title": str(item.get("title") or selfcore_proposal_title(section, feature)),
+                "merged_feature": feature,
+                "patch_text": str(item.get("patch_text") or f"- {feature}").strip(),
+                "candidate_ids": candidate_ids,
+                "confidence": normalize_confirmed_confidence(str(item.get("confidence") or "medium")),
+            }
+        )
+
+    clusters = cluster_selfcore_items(
+        normalized,
+        text_getter=lambda item: f"{item.get('title', '')} {item.get('merged_feature', '')} {item.get('patch_text', '')}",
+        section_getter=lambda item: str(item.get("section") or "SelfCore 候选"),
+        threshold=0.34,
+    )
+    merged: list[dict[str, Any]] = []
+    for cluster in clusters:
+        items = cluster["items"]
+        section = best_selfcore_section(items, cluster["section"])
+        feature = synthesize_selfcore_feature(items)
+        if not feature:
+            continue
+        candidate_ids = unique_candidate_ids(items)
+        merged.append(
+            {
+                "id": f"proposal-{len(merged) + 1}",
+                "section": section,
+                "title": selfcore_proposal_title(section, feature),
+                "merged_feature": feature,
+                "candidate_ids": candidate_ids,
+                "confidence": aggregate_selfcore_confidence(items),
+                "patch_text": f"- {feature}",
+                "merge_reason": f"二次去重合并 {len(items)} 条模型提案",
+            }
+        )
+    return merged
 
 
 def model_selfcore_merge(
@@ -1957,9 +2625,12 @@ def model_selfcore_merge(
 {candidate_lines}
 
 要求：
-- 合并重复、相近、同义的候选，不要逐条堆砌。
+- 先做语义聚类，再写提案；同义、近义、同一行为的不同说法必须合成同一个 proposal。
+- 不要逐条复述候选，不要把候选改写成一串 bullet；每个 proposal 只保留 1 个稳定抽象。
+- 同一 section 下的 proposal 必须互斥，不得重复表达同一个意思。
 - 区分稳定特征、表达风格、互动习惯、反模式/边界。
 - 不要把单次状态写成稳定人格；置信度不足时写成候选或观察。
+- patch_text 要短，优先 1 条 Markdown bullet；除非必要，不要展开证据列表。
 - 每个提案必须保留 candidate_ids。
 - 只输出 JSON。
 
@@ -1996,10 +2667,13 @@ JSON 结构：
         fallback["engine"] = "poe_model_unparseable_local_fallback"
         fallback["error"] = "model output is not valid proposal JSON"
         return fallback
+    proposals = postprocess_selfcore_proposals(parsed.get("proposals") or [], candidates)
     return {
-        "engine": "poe_model",
-        "proposals": parsed.get("proposals") or [],
+        "engine": "poe_model_semantic_postprocess",
+        "proposals": proposals,
         "questions": parsed.get("questions") or [],
+        "cluster_count": len(proposals),
+        "deduped_count": max(0, len(candidates) - len(proposals)),
     }
 
 
@@ -2674,6 +3348,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path == "/selfcore-candidates.css":
             self.serve_file(DASHBOARD_DIR / "selfcore-candidates.css")
             return
+        if self.path == "/news-alignment.html":
+            self.serve_file(DASHBOARD_DIR / "news-alignment.html")
+            return
+        if self.path == "/news-alignment.js":
+            self.serve_file(DASHBOARD_DIR / "news-alignment.js")
+            return
+        if self.path == "/news-alignment.css":
+            self.serve_file(DASHBOARD_DIR / "news-alignment.css")
+            return
         if self.path == "/app.js":
             self.serve_file(DASHBOARD_DIR / "app.js")
             return
@@ -2709,6 +3392,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/multimodal/diarized-asr",
             "/api/multimodal/diarized-asr-job",
             "/api/multimodal/confirm",
+            "/api/news-alignment/analyze",
+            "/api/news-alignment/confirm",
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
@@ -2729,6 +3414,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = start_diarized_asr_job(payload)
             elif self.path == "/api/multimodal/confirm":
                 result = confirm_multimodal_candidates(payload)
+            elif self.path == "/api/news-alignment/analyze":
+                result = generate_news_alignment(payload)
+            elif self.path == "/api/news-alignment/confirm":
+                result = confirm_news_alignment_candidates(payload)
             elif self.path == "/api/speaker-profiles/enroll":
                 result = enroll_speaker_profile(payload)
             elif self.path == "/api/selfcore-candidates/merge":
