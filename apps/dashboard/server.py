@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 import csv
 from datetime import date
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 import html
 import importlib.util
 import json
@@ -73,29 +74,58 @@ TOPIC_LABELS = {
 
 NEWS_ALIGNMENT_FEEDS = [
     {
-        "slug": "ai-agent",
-        "topic": "AI / 大模型 / Agent",
-        "url": "https://news.google.com/rss/search?q=AI%20OR%20%E5%A4%A7%E6%A8%A1%E5%9E%8B%20OR%20Agent&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "slug": "36kr",
+        "source": "36氪",
+        "topic": "产品 / 组织 / 创业 / AI",
+        "url": "https://36kr.com/feed",
     },
     {
-        "slug": "housing-city",
-        "topic": "房产 / 城市 / 居住",
-        "url": "https://news.google.com/rss/search?q=%E6%88%BF%E4%BA%A7%20OR%20%E6%A5%BC%E5%B8%82%20OR%20%E5%9F%8E%E5%B8%82%20OR%20%E5%B1%85%E4%BD%8F&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "slug": "ifanr",
+        "source": "爱范儿",
+        "topic": "AI / 消费科技 / 产品",
+        "url": "https://www.ifanr.com/feed",
     },
     {
-        "slug": "macro-market",
-        "topic": "宏观 / 投资 / 市场",
-        "url": "https://news.google.com/rss/search?q=%E5%AE%8F%E8%A7%82%20OR%20%E8%82%A1%E7%A5%A8%20OR%20%E6%8A%95%E8%B5%84%20OR%20%E5%B8%82%E5%9C%BA&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "slug": "sspai",
+        "source": "少数派",
+        "topic": "数字生活 / 工具 / 产品",
+        "url": "https://sspai.com/feed",
     },
     {
-        "slug": "product-org",
-        "topic": "产品 / 组织 / 创业",
-        "url": "https://news.google.com/rss/search?q=%E4%BA%A7%E5%93%81%20OR%20%E5%88%9B%E4%B8%9A%20OR%20%E8%A3%81%E5%91%98%20OR%20%E8%9E%8D%E8%B5%84%20OR%20%E7%BB%84%E7%BB%87&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "slug": "chinanews",
+        "source": "中新网",
+        "topic": "公共事件 / 社会",
+        "url": "https://www.chinanews.com.cn/rss/scroll-news.xml",
     },
     {
-        "slug": "policy-society",
+        "slug": "zaobao",
+        "source": "联合早报",
         "topic": "公共事件 / 政策 / 社会",
-        "url": "https://news.google.com/rss/search?q=%E6%94%BF%E7%AD%96%20OR%20%E7%9B%91%E7%AE%A1%20OR%20%E4%BA%89%E8%AE%AE%20OR%20%E7%A4%BE%E4%BC%9A&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "url": "https://feedx.net/rss/zaobao.xml",
+    },
+    {
+        "slug": "rfi",
+        "source": "法广",
+        "topic": "公共事件 / 国际 / 政策",
+        "url": "https://www.rfi.fr/cn/rss",
+    },
+    {
+        "slug": "bbc",
+        "source": "BBC中文",
+        "topic": "公共事件 / 国际 / 政策",
+        "url": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+    },
+    {
+        "slug": "nytimes",
+        "source": "纽约时报中文网",
+        "topic": "公共事件 / 国际 / 观点",
+        "url": "https://cn.nytimes.com/rss/",
+    },
+    {
+        "slug": "ft",
+        "source": "FT中文网",
+        "topic": "宏观 / 商业 / 国际",
+        "url": "https://www.ftchinese.com/rss/news",
     },
 ]
 
@@ -129,6 +159,154 @@ NEWS_DISCUSSION_KEYWORDS = {
     "股票": 3,
     "宏观": 3,
 }
+
+NEWS_CONFLICT_KEYWORDS = {
+    "争议": 6,
+    "分歧": 6,
+    "反对": 5,
+    "质疑": 5,
+    "监管": 5,
+    "调查": 5,
+    "限制": 5,
+    "禁止": 5,
+    "诉讼": 5,
+    "封号": 5,
+    "隐私": 5,
+    "泄露": 5,
+    "侵权": 5,
+    "偷": 5,
+    "风险": 4,
+    "裁员": 4,
+    "涨价": 4,
+    "降价": 4,
+    "亏损": 4,
+    "下跌": 4,
+    "上涨": 3,
+    "平台税": 5,
+    "反垄断": 5,
+    "未成年人": 5,
+    "合成": 3,
+    "假冒": 5,
+    "造假": 5,
+    "间谍": 5,
+    "制裁": 5,
+    "关税": 5,
+    "伊朗石油": 4,
+    "从严治党": 4,
+    "算力过剩": 5,
+    "误读": 4,
+    "数据安全": 5,
+    "警告": 4,
+    "判刑": 5,
+    "移民": 4,
+    "不平等": 4,
+    "维吾尔": 5,
+    "人权": 5,
+    "关切": 4,
+    "挑战": 3,
+}
+
+NEWS_MIN_CONFLICT_SCORE = 4
+NEWS_MODEL_CANDIDATE_POOL_SIZE = 60
+
+NEWS_ALIGNMENT_INTEREST_CATEGORIES = [
+    {
+        "id": "ai_tech_product",
+        "label": "AI / 技术路线 / 产品竞争",
+        "quota": 2,
+        "keywords": ["AI", "人工智能", "大模型", "Agent", "算力", "芯片", "机器人", "自动驾驶", "模型", "OpenAI", "英伟达", "苹果", "特斯拉", "产品"],
+    },
+    {
+        "id": "business_org",
+        "label": "商业 / 公司 / 组织治理",
+        "quota": 2,
+        "keywords": ["公司", "创业", "组织", "管理", "裁员", "融资", "并购", "CEO", "上市", "营收", "亏损", "平台", "商业"],
+    },
+    {
+        "id": "market_macro",
+        "label": "投资 / 市场 / 宏观",
+        "quota": 1,
+        "keywords": ["股", "债", "汇率", "利率", "通胀", "宏观", "央行", "房价", "楼市", "市场", "投资", "基金", "黄金", "美元"],
+    },
+    {
+        "id": "geopolitics",
+        "label": "中美 / 国际秩序 / 地缘竞争",
+        "quota": 2,
+        "keywords": ["美国", "中国", "欧盟", "日本", "俄罗斯", "印度", "关税", "制裁", "出口管制", "国家安全", "地缘", "外交", "战争", "国际"],
+    },
+    {
+        "id": "policy_society",
+        "label": "社会治理 / 政策 / 公共事件",
+        "quota": 1,
+        "keywords": ["政策", "监管", "政府", "法院", "调查", "公共", "社会", "治理", "未成年人", "隐私", "数据安全", "教育部", "公安"],
+    },
+    {
+        "id": "education_family_city",
+        "label": "教育 / 家庭 / 城市 / 生活结构",
+        "quota": 1,
+        "keywords": ["教育", "学校", "孩子", "家庭", "生育", "医疗", "住房", "城市", "养老", "就业", "生活", "消费"],
+    },
+    {
+        "id": "culture_game_content",
+        "label": "文化 / 游戏 / 内容 / 消费",
+        "quota": 1,
+        "keywords": ["游戏", "影视", "短剧", "内容", "社区", "社交", "消费", "品牌", "文旅", "音乐", "直播", "网红"],
+    },
+    {
+        "id": "wildcard",
+        "label": "反常识 / 盲区 / 价值观冲突",
+        "quota": 1,
+        "keywords": ["反常识", "争议", "分歧", "质疑", "反对", "风险", "不平等", "责任", "伦理", "边界", "代价"],
+    },
+]
+
+NEWS_ROUNDUP_TITLE_PATTERNS = [
+    "早报",
+    "晚报",
+    "氪星晚报",
+    "8点1氪",
+    "9点1氪",
+    "派早报",
+    "一周",
+    "周报",
+    "盘点",
+    "合集",
+    "汇总",
+    "速览",
+    "早知道",
+    "新闻早餐",
+    "一文看懂",
+    "要闻",
+    "快讯",
+]
+
+NEWS_NON_DISCUSSION_TITLE_PATTERNS = [
+    "送码",
+    "征文",
+    "试读",
+    "共创试读",
+    "活动",
+    "招募",
+    "投稿",
+    "福利",
+    "抽奖",
+    "直播预告",
+    "招聘",
+    "课程",
+    "优惠",
+    "折扣",
+    "查获",
+    "考察",
+    "启航",
+    "减重",
+    "骨骼",
+    "开馆",
+    "调研行",
+    "论学习贯彻",
+    "续写新的荣光",
+    "科普",
+    "指南",
+]
 
 
 def load_draft_generator():
@@ -2108,6 +2286,13 @@ def normalize_news_alignment_items(payload: dict[str, Any]) -> list[dict[str, st
     return items[:10]
 
 
+def compact_news_prompt_text(value: str, limit: int) -> str:
+    text = normalize_selfcore_text(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
 def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment: str) -> str:
     news_lines = []
     for item in news_items:
@@ -2116,8 +2301,8 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
                 [
                     f"- id: {item['news_id']}",
                     f"  title: {item['title']}",
-                    f"  summary: {item['summary'] or '（无摘要）'}",
-                    f"  detail: {item.get('detail') or '（无详情）'}",
+                    f"  summary: {compact_news_prompt_text(item.get('summary') or '', 520) or '（无摘要）'}",
+                    f"  detail: {compact_news_prompt_text(item.get('detail') or '', 900) or '（无详情）'}",
                     f"  source: {item['source'] or '（未提供）'}",
                     f"  url: {item.get('url') or '（未提供）'}",
                     f"  source_url: {item.get('source_url') or '（未提供）'}",
@@ -2130,10 +2315,10 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
 目标不是写新闻摘要，也不是对外发消息，而是帮助数字“我”和用户本人围绕每日 10 条新闻校准三观、判断方式、表达力度和近期关注点。
 
 现有 SelfCore 摘要：
-{self_core_excerpt()}
+{compact_news_prompt_text(self_core_excerpt(), 2400)}
 
-已确认的新闻对齐记忆摘要：
-{confirmed_news_alignment_memory_excerpt()}
+已注入 SelfCore 的新闻对齐记忆摘要（未注入候选不会出现在这里，也不能当作 SelfCore 依据）：
+{compact_news_prompt_text(confirmed_news_alignment_memory_excerpt(), 1400)}
 
 今日新闻候选：
 {chr(10).join(news_lines)}
@@ -2151,8 +2336,13 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
       "fact_summary": "只复述已给定事实，不补外部事实",
       "why_user_may_care": "为什么用户可能关心",
       "first_reaction": "数字“我”按当前 SelfCore 的第一反应",
-      "my_viewpoint": "直接输出数字“我”的观点，要有态度，但保留事实不足处的不确定性",
-      "judgment_frame": "使用了什么判断框架",
+      "my_viewpoint": "直接输出数字“我”的观点，要有态度、判断链条和取舍，约 180-260 字；不能只写泛泛而谈的摘要评论",
+      "deep_viewpoint": "更详实的数字“我”初判，约 260-420 字：先说明我站在哪一边或更倾向什么，再解释为什么、我在权衡什么、我不接受什么叙事、什么事实会改变判断",
+      "selfcore_basis": ["这条判断调用了 SelfCore 里的哪些稳定特征、偏好或边界"],
+      "judgment_frame": "使用了什么判断框架；至少包含核心变量、权重排序和反方最强理由",
+      "possible_user_disagreement": "用户本人最可能纠正数字“我”的地方，写具体，不要写成请用户随便补充",
+      "boundary_conditions": ["哪些前提改变后，数字“我”的判断会明显变化"],
+      "attitude_markers": ["能体现数字“我”表达风格或价值倾向的关键词/短句"],
       "uncertainties": ["事实不足或不能下结论的点"],
       "questions_for_user": ["最值得问用户确认的问题"],
       "can_discuss_with": ["可聊对象类型或空数组"],
@@ -2178,6 +2368,12 @@ def build_news_alignment_prompt(news_items: list[dict[str, str]], user_alignment
 硬规则：
 - 不得使用模型旧知识补齐新闻事实；只能基于输入新闻和用户补充。
 - `selected_news` 必须覆盖输入的全部新闻，不能只挑 3-5 条；如果某条不值得深入，仍要给出简短观点和跳过理由。
+- 每条新闻的 `my_viewpoint` 和 `deep_viewpoint` 是核心产物，不是摘要：必须体现数字“我”的稳定判断特征、价值排序、怀疑点、取舍和边界条件。
+- 禁止空泛句式：例如“需要持续关注”“要辩证看待”“既有机遇也有挑战”“还需更多信息”不能单独构成观点；如果使用，必须接具体判断变量和倾向。
+- `deep_viewpoint` 要写出一条可被用户纠正的明确立场：我更赞成/更反对/更警惕/更愿意押注/更不愿意接受什么，而不是中性复述。
+- `selfcore_basis` 必须从现有 SelfCore 或新闻对齐记忆里抽取依据；如果依据不足，要写“依据不足：需要用户校对”，不能假装已经了解用户。
+- `selfcore_basis` 禁止引用尚未注入 SelfCore 的候选池内容；候选池只是待审材料，不是数字“我”的稳定依据。
+- `possible_user_disagreement` 必须具体到“用户可能会纠正我的哪一种权重/边界/表达力度”，用来引导用户校对。
 - 二手新闻只进入候选判断，不进入确定结论。
 - 如果用户没有明确确认，`calibration_candidates.needs_user_confirmation` 必须为 true。
 - 候选要写成“用户的判断方式/关注点/表达边界”，不要写成新闻本身。
@@ -2197,6 +2393,11 @@ def parse_rss_datetime(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    try:
+        parsed = parsedate_to_datetime(text)
+        return parsed.isoformat(timespec="seconds")
+    except (TypeError, ValueError, IndexError):
+        pass
     for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S %z"):
         try:
             return datetime.strptime(text, fmt).isoformat(timespec="seconds")
@@ -2205,12 +2406,59 @@ def parse_rss_datetime(value: str) -> str:
     return text[:120]
 
 
+def parse_news_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+        return parsed.replace(tzinfo=None)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def parse_news_date_from_url(value: str) -> datetime | None:
+    text = str(value or "")
+    patterns = [
+        r"story(20\d{2})(\d{2})(\d{2})",
+        r"/(20\d{2})/(\d{2})-(\d{2})/",
+        r"/(20\d{2})-(\d{2})-(\d{2})/",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        try:
+            year, month, day = (int(part) for part in match.groups())
+            return datetime(year, month, day)
+        except ValueError:
+            continue
+    return None
+
+
+def is_recent_news_item(item: dict[str, str], max_age_days: int = 3) -> bool:
+    url_date = parse_news_date_from_url(item.get("url", ""))
+    if url_date is not None and url_date < datetime.now() - timedelta(days=max_age_days):
+        return False
+    published = parse_news_datetime(item.get("published_at", ""))
+    if published is None:
+        return True
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    return published >= cutoff
+
+
 def discussion_score(item: dict[str, str]) -> int:
-    text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')}"
+    text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')} {item.get('detail', '')[:1200]}"
     score = 0
     for keyword, weight in NEWS_DISCUSSION_KEYWORDS.items():
         if keyword.lower() in text.lower():
             score += weight
+    score += conflict_score(item) * 2
     if item.get("source"):
         score += 1
     if item.get("published_at"):
@@ -2218,6 +2466,207 @@ def discussion_score(item: dict[str, str]) -> int:
     if len(item.get("summary", "")) >= 40:
         score += 1
     return score
+
+
+def conflict_score(item: dict[str, str]) -> int:
+    text = normalize_selfcore_text(
+        f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')} {item.get('detail', '')[:1600]}"
+    )
+    score = 0
+    for keyword, weight in NEWS_CONFLICT_KEYWORDS.items():
+        if normalize_selfcore_text(keyword) in text:
+            score += weight
+    return score
+
+
+def news_category_scores(item: dict[str, str]) -> dict[str, int]:
+    text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')} {item.get('detail', '')[:1600]}"
+    normalized = normalize_selfcore_text(text)
+    scores: dict[str, int] = {}
+    for category in NEWS_ALIGNMENT_INTEREST_CATEGORIES:
+        score = 0
+        for keyword in category["keywords"]:
+            if normalize_selfcore_text(str(keyword)) in normalized:
+                score += 2 if keyword in item.get("title", "") else 1
+        scores[str(category["id"])] = score
+    return scores
+
+
+def category_label(category_id: str) -> str:
+    for category in NEWS_ALIGNMENT_INTEREST_CATEGORIES:
+        if category["id"] == category_id:
+            return str(category["label"])
+    return "未分类"
+
+
+def annotate_news_interest_category(item: dict[str, str]) -> None:
+    scores = news_category_scores(item)
+    ranked = sorted(scores.items(), key=lambda row: (-row[1], row[0]))
+    primary = ranked[0][0] if ranked and ranked[0][1] > 0 else "wildcard"
+    secondary = ranked[1][0] if len(ranked) > 1 and ranked[1][1] > 0 else ""
+    item["interest_category"] = primary
+    item["interest_category_label"] = category_label(primary)
+    item["secondary_interest_category"] = secondary
+    item["interest_category_score"] = str(ranked[0][1] if ranked else 0)
+
+
+def event_cluster_key(item: dict[str, str]) -> str:
+    text = normalize_selfcore_text(f"{item.get('title', '')} {item.get('summary', '')}")
+    tokens = re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]{2,}", text)
+    stopwords = {"新闻", "表示", "宣布", "回应", "中国", "美国", "公司", "市场", "政策", "可能", "已经", "进行"}
+    useful = [token for token in tokens if token not in stopwords]
+    return "|".join(useful[:4]) or normalize_selfcore_text(item.get("title", ""))[:24]
+
+
+def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int, strict_quota: bool = True) -> list[dict[str, str]]:
+    if not candidates:
+        return []
+    for item in candidates:
+        if not item.get("interest_category"):
+            annotate_news_interest_category(item)
+        item["_event_cluster"] = event_cluster_key(item)
+
+    quota_by_category = {
+        str(category["id"]): int(category.get("quota") or 1)
+        for category in NEWS_ALIGNMENT_INTEREST_CATEGORIES
+    }
+    selected: list[dict[str, str]] = []
+    selected_ids: set[str] = set()
+    category_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    cluster_seen: set[str] = set()
+
+    def score(item: dict[str, str]) -> int:
+        model_score = int(str(item.get("model_discussion_score") or "0").strip() or 0)
+        return (
+            model_score * 12
+            + int(item.get("discussion_score") or 0)
+            + int(item.get("conflict_score") or 0) * 3
+            + int(item.get("interest_category_score") or 0)
+        )
+
+    ranked = sorted(candidates, key=score, reverse=True)
+    for item in ranked:
+        category = str(item.get("interest_category") or "wildcard")
+        source = str(item.get("source") or "")
+        cluster = str(item.get("_event_cluster") or "")
+        if item.get("news_id") in selected_ids:
+            continue
+        if strict_quota and category_counts.get(category, 0) >= quota_by_category.get(category, 1):
+            continue
+        if source and source_counts.get(source, 0) >= 2:
+            continue
+        if cluster and cluster in cluster_seen:
+            continue
+        selected.append(item)
+        selected_ids.add(str(item.get("news_id")))
+        category_counts[category] = category_counts.get(category, 0) + 1
+        source_counts[source] = source_counts.get(source, 0) + 1
+        if cluster:
+            cluster_seen.add(cluster)
+        if len(selected) >= limit:
+            break
+
+    if len(selected) < limit:
+        for item in ranked:
+            if item.get("news_id") in selected_ids:
+                continue
+            source = str(item.get("source") or "")
+            cluster = str(item.get("_event_cluster") or "")
+            if source and source_counts.get(source, 0) >= 2:
+                continue
+            if cluster and cluster in cluster_seen:
+                continue
+            selected.append(item)
+            selected_ids.add(str(item.get("news_id")))
+            source_counts[source] = source_counts.get(source, 0) + 1
+            if cluster:
+                cluster_seen.add(cluster)
+            if len(selected) >= limit:
+                break
+
+    if len(selected) < limit:
+        for item in ranked:
+            if item.get("news_id") in selected_ids:
+                continue
+            selected.append(item)
+            selected_ids.add(str(item.get("news_id")))
+            if len(selected) >= limit:
+                break
+
+    for item in candidates:
+        item.pop("_event_cluster", None)
+    return selected[:limit]
+
+
+def is_roundup_news_item(item: dict[str, str]) -> bool:
+    raw_title = item.get("title", "")
+    title = normalize_selfcore_text(raw_title)
+    summary = normalize_selfcore_text(item.get("summary", ""))
+    for pattern in NEWS_ROUNDUP_TITLE_PATTERNS:
+        if normalize_selfcore_text(pattern) in title:
+            return True
+    if re.search(r"\d+\s*点\s*1\s*氪", raw_title, flags=re.IGNORECASE):
+        return True
+    if re.search(r"(早报|晚报|日报|周报)[｜丨|:：]", item.get("title", "")):
+        return True
+    if re.search(r"[｜丨|]", raw_title) and len(re.split(r"[；;]", raw_title)) >= 3:
+        return True
+    semicolon_markers = raw_title.count("；") + raw_title.count(";")
+    list_markers = raw_title.count("、")
+    multi_item_markers = semicolon_markers + list_markers
+    if semicolon_markers >= 2 or list_markers >= 4:
+        return True
+    if multi_item_markers >= 3 and any(word in summary for word in ["获悉", "发布", "宣布", "回应"]):
+        return True
+    return False
+
+
+def is_non_discussion_news_item(item: dict[str, str]) -> bool:
+    title = normalize_selfcore_text(item.get("title", ""))
+    for pattern in NEWS_NON_DISCUSSION_TITLE_PATTERNS:
+        if normalize_selfcore_text(pattern) in title:
+            return True
+    return False
+
+
+def xml_node_text(node: ET.Element, name: str) -> str:
+    return strip_html_text(node.findtext(name) or "")
+
+
+def regex_extract_tag(block: str, tag: str) -> str:
+    match = re.search(rf"<{tag}(?:\s[^>]*)?>(.*?)</{tag}>", block, flags=re.IGNORECASE | re.DOTALL)
+    return strip_html_text(match.group(1)) if match else ""
+
+
+def parse_rss_items_fallback(feed: dict[str, str], body: bytes) -> list[dict[str, str]]:
+    text = body.decode("utf-8", errors="replace")
+    items: list[dict[str, str]] = []
+    for index, match in enumerate(re.finditer(r"<item\b[^>]*>(.*?)</item>", text, flags=re.IGNORECASE | re.DOTALL), start=1):
+        if index > 50:
+            break
+        block = match.group(1)
+        title = regex_extract_tag(block, "title")
+        summary = regex_extract_tag(block, "description")
+        rss_detail = regex_extract_tag(block, "content:encoded")
+        link = regex_extract_tag(block, "link")
+        published_at = parse_rss_datetime(regex_extract_tag(block, "pubDate"))
+        if not title:
+            continue
+        items.append(
+            {
+                "news_id": f"{feed.get('slug') or 'news'}-{index}",
+                "title": title[:300],
+                "summary": summary[:1000],
+                "rss_detail": rss_detail[:2400],
+                "source": str(feed.get("source") or feed.get("slug") or link),
+                "url": link,
+                "source_url": "",
+                "published_at": published_at,
+                "tags": feed["topic"],
+            }
+        )
+    return items
 
 
 def fetch_rss_feed(feed: dict[str, str], timeout: float = 6.0) -> list[dict[str, str]]:
@@ -2230,12 +2679,16 @@ def fetch_rss_feed(feed: dict[str, str], timeout: float = 6.0) -> list[dict[str,
     )
     with request.urlopen(req, timeout=timeout) as response:
         body = response.read(1_500_000)
-    root = ET.fromstring(body)
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return parse_rss_items_fallback(feed, body)
     items: list[dict[str, str]] = []
-    for index, node in enumerate(root.findall(".//item")[:12], start=1):
-        title = strip_html_text(node.findtext("title") or "")
-        summary = strip_html_text(node.findtext("description") or "")
-        link = strip_html_text(node.findtext("link") or "")
+    for index, node in enumerate(root.findall(".//item")[:50], start=1):
+        title = xml_node_text(node, "title")
+        summary = xml_node_text(node, "description")
+        rss_detail = strip_html_text(node.findtext("{http://purl.org/rss/1.0/modules/content/}encoded") or "")
+        link = xml_node_text(node, "link")
         published_at = parse_rss_datetime(node.findtext("pubDate") or "")
         source_node = node.find("source")
         source = strip_html_text(source_node.text if source_node is not None else "")
@@ -2247,7 +2700,8 @@ def fetch_rss_feed(feed: dict[str, str], timeout: float = 6.0) -> list[dict[str,
                 "news_id": f"{feed.get('slug') or 'news'}-{index}",
                 "title": title[:300],
                 "summary": summary[:1000],
-                "source": source or link,
+                "rss_detail": rss_detail[:2400],
+                "source": source or str(feed.get("source") or "") or link,
                 "url": link,
                 "source_url": source_url,
                 "published_at": published_at,
@@ -2275,12 +2729,24 @@ def is_weak_article_detail(url: str, detail: str) -> bool:
     parsed = urlparse(url)
     if "news.google." in parsed.netloc:
         return True
+    if len(text) < 180:
+        return True
     weak_phrases = [
         "comprehensive up-to-date news coverage",
         "aggregated from sources all over the world",
         "google news",
+        "登录",
+        "注册",
+        "客户端下载",
     ]
     return any(phrase in text for phrase in weak_phrases)
+
+
+def has_usable_news_detail(item: dict[str, str]) -> bool:
+    detail = str(item.get("detail") or "").strip()
+    if not detail:
+        return False
+    return not is_weak_article_detail(str(item.get("resolved_url") or item.get("url") or ""), detail)
 
 
 def fetch_article_detail(url: str, timeout: float = 5.0) -> dict[str, str]:
@@ -2360,12 +2826,176 @@ def build_news_detail_fallback(item: dict[str, str], detail_status: str = "") ->
     return "\n".join(row for row in rows if row is not None).strip()
 
 
+def hydrate_news_item_detail(item: dict[str, str]) -> bool:
+    if item.get("_detail_checked"):
+        return has_usable_news_detail(item)
+    item["_detail_checked"] = "1"
+    detail = fetch_article_detail(item.get("url", ""))
+    item.update(detail)
+    if not has_usable_news_detail(item):
+        rss_detail = str(item.get("rss_detail") or "").strip()
+        if rss_detail and not is_weak_article_detail(item.get("url", ""), rss_detail):
+            item["detail"] = rss_detail[:1800]
+            item["detail_status"] = "rss_content"
+    if not has_usable_news_detail(item):
+        item["detail"] = ""
+        return False
+    if not item.get("summary") or item["summary"] == item["title"]:
+        item["summary"] = item["detail"][:1000]
+    return True
+
+
+def news_screening_excerpt(value: str, limit: int) -> str:
+    text = normalize_selfcore_text(value)
+    return text[:limit]
+
+
+def build_news_screening_prompt(candidates: list[dict[str, str]], limit: int) -> str:
+    rows = []
+    for index, item in enumerate(candidates, start=1):
+        rows.append(
+            "\n".join(
+                [
+                    f"{index}. news_id: {item.get('news_id', '')}",
+                    f"title: {item.get('title', '')}",
+                    f"source: {item.get('source', '')}",
+                    f"published_at: {item.get('published_at', '')}",
+                    f"tags: {item.get('tags', '')}",
+                    f"interest_category: {item.get('interest_category_label', '')} ({item.get('interest_category', '')})",
+                    f"code_discussion_score: {item.get('discussion_score', '')}",
+                    f"code_conflict_score: {item.get('conflict_score', '')}",
+                    f"summary: {news_screening_excerpt(item.get('summary', ''), 420)}",
+                    f"detail_excerpt: {news_screening_excerpt(item.get('detail', ''), 700)}",
+                ]
+            )
+        )
+    category_rows = [
+        f"- {category['id']}：{category['label']}，目标 {category.get('quota', 1)} 条"
+        for category in NEWS_ALIGNMENT_INTEREST_CATEGORIES
+    ]
+    return f"""你是数字“我”的每日新闻对齐选题编辑。当前日期：{date.today().isoformat()}。
+任务：从候选新闻中选出最多 {limit} 条，作为“数字我先给观点，用户再校对/纠正，沉淀 SelfCore 候选”的讨论材料。
+
+筛选标准：
+- 必须是一条相对单一的新闻事件，不要合集、列表、早晚报、多个无关事实拼盘。
+- 优先选择会暴露价值判断差异的新闻：权利 vs 秩序、创新 vs 风险、平台/政府/市场边界、效率 vs 公平、长期主义 vs 短期收益、AI 进步 vs 安全/隐私、责任归因、国际关系立场等。
+- 每日 10 条要尽量覆盖用户画像里的不同兴趣类别，不要都集中在 AI、国际政治或宏观商业热点。
+- 同一来源最多选 2 条；同一事件链最多选 1 条；如果两条新闻只能校准同一种判断，保留更具体、更有冲突的一条。
+- 至少保留 1 条“平时不一定主动看、但可能暴露盲区或反常识判断”的野卡新闻。
+- 降低纯客观通知、产品发布、活动信息、单纯涨跌、宣传稿、弱争议事实陈述的排序。
+- 只根据下面输入判断，不要补充外部事实。
+
+兴趣类别目标：
+{chr(10).join(category_rows)}
+
+现有 SelfCore 摘要（只用于判断哪些议题更适合对齐，不用于补新闻事实）：
+{self_core_excerpt()[:1200]}
+
+候选新闻：
+{chr(10).join(rows)}
+
+只输出合法 JSON，不要 Markdown，不要解释。结构如下：
+{{
+  "selected_news_ids": [
+    {{
+      "news_id": "必须来自候选",
+      "discussion_score": 1,
+      "primary_category": "必须使用上面兴趣类别 id 之一",
+      "secondary_category": "可为空，必须使用上面兴趣类别 id 之一",
+      "conflict_axis": "这条新闻最适合对齐的观点冲突轴",
+      "why_alignment_worthy": "为什么适合让数字我先表态、用户再校对",
+      "diversity_reason": "它补足了今天 10 条中的哪个兴趣类别或盲区"
+    }}
+  ],
+  "rejected_news_ids": [
+    {{
+      "news_id": "来自候选",
+      "reason": "不适合作为对齐讨论材料的原因"
+    }}
+  ]
+}}
+
+硬规则：
+- selected_news_ids 最多 {limit} 条。
+- discussion_score 使用 1-10，10 表示最能引发三观/判断方式校准。
+- 最终选择应尽量覆盖 6 个以上兴趣类别；除非候选不足，单个类别不要超过 2 条。
+- 如果候选质量不足，可以少于 {limit} 条，但不要选低价值新闻凑数。
+- 不要创造 news_id。"""
+
+
+def model_screen_news_candidates(
+    candidates: list[dict[str, str]],
+    limit: int,
+    api_key: str,
+    model: str,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    if not candidates or not api_key:
+        return candidates[:limit], {"model_screening": False}
+    prompt = build_news_screening_prompt(candidates, limit)
+    text, error_message = call_poe_model(
+        prompt,
+        api_key,
+        model or "GPT-4o",
+        system_prompt="你是严格的新闻对齐选题筛选器，只输出合法 JSON；不得补充外部事实。",
+        temperature=0.1,
+        timeout=75,
+    )
+    if not text:
+        return candidates[:limit], {
+            "model_screening": False,
+            "model_error": error_message or "news screening model returned no result",
+        }
+    parsed = parse_json_object(text)
+    if parsed is None:
+        return candidates[:limit], {
+            "model_screening": False,
+            "model_error": "news screening model output is not valid JSON",
+        }
+    by_id = {str(item.get("news_id")): item for item in candidates}
+    selected: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in parsed.get("selected_news_ids") or []:
+        if not isinstance(row, dict):
+            continue
+        news_id = str(row.get("news_id") or "").strip()
+        if not news_id or news_id in seen or news_id not in by_id:
+            continue
+        item = by_id[news_id]
+        item["model_discussion_score"] = str(row.get("discussion_score") or "").strip()
+        valid_categories = {str(category["id"]) for category in NEWS_ALIGNMENT_INTEREST_CATEGORIES}
+        primary_category = str(row.get("primary_category") or item.get("interest_category") or "").strip()
+        secondary_category = str(row.get("secondary_category") or item.get("secondary_interest_category") or "").strip()
+        if primary_category and primary_category in valid_categories:
+            item["interest_category"] = primary_category
+            item["interest_category_label"] = category_label(primary_category)
+        if secondary_category and secondary_category in valid_categories:
+            item["secondary_interest_category"] = secondary_category
+        item["conflict_axis"] = str(row.get("conflict_axis") or "").strip()[:500]
+        item["alignment_value_reason"] = str(row.get("why_alignment_worthy") or "").strip()[:800]
+        item["diversity_reason"] = str(row.get("diversity_reason") or "").strip()[:500]
+        selected.append(item)
+        seen.add(news_id)
+        if len(selected) >= limit:
+            break
+    rerank_pool = selected + [item for item in candidates if item.get("news_id") not in seen]
+    selected = diversity_rank_news_candidates(rerank_pool, limit, strict_quota=True)
+    return selected[:limit], {
+        "model_screening": True,
+        "model_selected_count": len(seen),
+        "model_rejected_count": len(parsed.get("rejected_news_ids") or []),
+        "diversity_rerank": True,
+    }
+
+
 def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         limit = int(payload.get("limit") or 10)
     except (TypeError, ValueError):
         limit = 10
     limit = min(max(limit, 1), 10)
+    api_key = str(payload.get("poe_api_key") or "").strip()
+    model = str(payload.get("poe_model") or "GPT-4o").strip()
+    use_model_screening = bool(api_key) and payload.get("use_model_screening", True) is not False
     fetched: list[dict[str, str]] = []
     errors: list[str] = []
     for feed in NEWS_ALIGNMENT_FEEDS:
@@ -2376,7 +3006,19 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
 
     deduped: list[dict[str, str]] = []
     seen: set[str] = set()
+    discarded_roundup = 0
+    discarded_non_discussion = 0
+    discarded_stale = 0
     for item in fetched:
+        if not is_recent_news_item(item):
+            discarded_stale += 1
+            continue
+        if is_roundup_news_item(item):
+            discarded_roundup += 1
+            continue
+        if is_non_discussion_news_item(item):
+            discarded_non_discussion += 1
+            continue
         key = normalize_selfcore_text(item.get("title", ""))
         if not key or key in seen:
             continue
@@ -2384,43 +3026,75 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
         item["discussion_score"] = str(discussion_score(item))
         deduped.append(item)
     deduped.sort(key=lambda item: (-int(item.get("discussion_score") or 0), item.get("published_at", "")))
-    selected: list[dict[str, str]] = []
-    topic_counts: dict[str, int] = {}
-    per_topic_limit = 3
+    candidate_pool: list[dict[str, str]] = []
+    discarded_no_detail = 0
+    discarded_low_discussion = 0
+    category_counts: dict[str, int] = {}
+    per_category_limit = 10 if use_model_screening else 3
+    pool_limit = max(limit, NEWS_MODEL_CANDIDATE_POOL_SIZE if use_model_screening else limit)
     for item in deduped:
-        topic = item.get("tags", "")
-        if topic_counts.get(topic, 0) >= per_topic_limit:
+        if not hydrate_news_item_detail(item):
+            discarded_no_detail += 1
             continue
-        selected.append(item)
-        topic_counts[topic] = topic_counts.get(topic, 0) + 1
-        if len(selected) >= limit:
+        item["conflict_score"] = str(conflict_score(item))
+        item["discussion_score"] = str(discussion_score(item))
+        annotate_news_interest_category(item)
+        category = item.get("interest_category", "wildcard")
+        if category_counts.get(category, 0) >= per_category_limit:
+            continue
+        if int(item["conflict_score"]) < NEWS_MIN_CONFLICT_SCORE:
+            discarded_low_discussion += 1
+            continue
+        candidate_pool.append(item)
+        category_counts[category] = category_counts.get(category, 0) + 1
+        if len(candidate_pool) >= pool_limit:
             break
-    if len(selected) < limit:
-        selected_ids = {item["news_id"] for item in selected}
+    if len(candidate_pool) < pool_limit:
+        selected_ids = {item["news_id"] for item in candidate_pool}
         for item in deduped:
             if item["news_id"] in selected_ids:
                 continue
-            selected.append(item)
-            if len(selected) >= limit:
+            if not hydrate_news_item_detail(item):
+                discarded_no_detail += 1
+                continue
+            item["conflict_score"] = str(conflict_score(item))
+            item["discussion_score"] = str(discussion_score(item))
+            annotate_news_interest_category(item)
+            if int(item["conflict_score"]) < NEWS_MIN_CONFLICT_SCORE:
+                discarded_low_discussion += 1
+                continue
+            candidate_pool.append(item)
+            if len(candidate_pool) >= pool_limit:
                 break
-    for item in selected:
-        detail = fetch_article_detail(item.get("url", ""))
-        item.update(detail)
-        if detail.get("detail"):
-            if not item.get("summary") or item["summary"] == item["title"]:
-                item["summary"] = detail["detail"][:1000]
-        else:
-            item["detail"] = build_news_detail_fallback(item, detail.get("detail_status", ""))
-            item["detail_status"] = detail.get("detail_status") or "fallback"
+    if use_model_screening and candidate_pool:
+        selected, model_meta = model_screen_news_candidates(candidate_pool, limit, api_key, model)
+        if model_meta.get("model_error"):
+            errors.append(str(model_meta["model_error"]))
+    else:
+        selected = diversity_rank_news_candidates(candidate_pool, limit, strict_quota=True)
+        model_meta = {"model_screening": False, "diversity_rerank": True}
     if not selected and errors:
         raise ValueError("news fetch failed: " + " | ".join(errors[:3]))
+    for item in candidate_pool:
+        item.pop("_detail_checked", None)
     return {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "news_items": selected,
         "fetched_count": len(fetched),
         "selected_count": len(selected),
+        "candidate_pool_count": len(candidate_pool),
+        "discarded_no_detail": discarded_no_detail,
+        "discarded_roundup": discarded_roundup,
+        "discarded_non_discussion": discarded_non_discussion,
+        "discarded_stale": discarded_stale,
+        "discarded_low_discussion": discarded_low_discussion,
         "errors": errors[:5],
-        "selection_basis": "按可讨论性、分歧可能性、事实完整度和 SelfCore 主题优先级筛选",
+        "model_screening": model_meta.get("model_screening", False),
+        "model_selected_count": model_meta.get("model_selected_count", 0),
+        "model_rejected_count": model_meta.get("model_rejected_count", 0),
+        "diversity_rerank": model_meta.get("diversity_rerank", False),
+        "model_error": model_meta.get("model_error", ""),
+        "selection_basis": "先多抓原站候选，丢弃过期新闻、合集/早晚报/内容营销和无详情新闻；再按兴趣画像类别归类，控制同类/同源/同事件扎堆；最后用 Poe 判断对齐价值并做多样性重排",
     }
 
 
@@ -2433,19 +3107,99 @@ def generate_news_alignment(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("poe_api_key is required for news alignment")
     model = str(payload.get("poe_model") or "GPT-4o").strip()
     user_alignment = str(payload.get("user_alignment") or payload.get("discussion_notes") or "").strip()
-    prompt = build_news_alignment_prompt(news_items, user_alignment)
-    text, error_message = call_poe_model(
-        prompt,
-        api_key,
-        model,
-        system_prompt="你是严格的每日新闻对齐器，只输出合法 JSON；不得用外部记忆补新闻事实。",
-        temperature=0.2,
-    )
-    if not text:
-        raise ValueError(error_message or "news alignment model returned no result")
-    parsed = parse_json_object(text)
-    if parsed is None:
-        raise ValueError("news alignment model output is not valid JSON")
+    raw_alignment_by_news_id = payload.get("user_alignment_by_news_id")
+    alignment_by_news_id = raw_alignment_by_news_id if isinstance(raw_alignment_by_news_id, dict) else {}
+    system_prompt = "你是数字“我”的每日新闻观点蒸馏器，只输出合法 JSON；你要基于输入新闻和 SelfCore 给出有立场、有取舍、有边界的深度初判，不得用外部记忆补新闻事实。"
+
+    def analyze_one(index: int, item: dict[str, str]) -> dict[str, Any]:
+        news_id = str(item.get("news_id") or "").strip()
+        item_alignment = str(alignment_by_news_id.get(news_id) or "").strip()
+        if not item_alignment and len(news_items) == 1:
+            item_alignment = user_alignment
+        prompt = build_news_alignment_prompt([item], item_alignment)
+        text, error_message = call_poe_model(
+            prompt,
+            api_key,
+            model,
+            system_prompt=system_prompt,
+            temperature=0.2,
+            timeout=90,
+        )
+        if not text:
+            return {
+                "index": index,
+                "ok": False,
+                "news_id": item.get("news_id"),
+                "title": item.get("title"),
+                "error": error_message or "news alignment model returned no result",
+                "raw_model_text": "",
+            }
+        parsed = parse_json_object(text)
+        if parsed is None:
+            return {
+                "index": index,
+                "ok": False,
+                "news_id": item.get("news_id"),
+                "title": item.get("title"),
+                "error": "news alignment model output is not valid JSON",
+                "raw_model_text": text,
+            }
+        return {
+            "index": index,
+            "ok": True,
+            "news_id": item.get("news_id"),
+            "title": item.get("title"),
+            "parsed": parsed,
+            "raw_model_text": text,
+        }
+
+    if len(news_items) == 1:
+        per_item_results = [analyze_one(0, news_items[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(3, len(news_items))) as executor:
+            futures = [
+                executor.submit(analyze_one, index, item)
+                for index, item in enumerate(news_items)
+            ]
+            per_item_results = [future.result() for future in futures]
+        per_item_results.sort(key=lambda row: int(row.get("index") or 0))
+
+    successful = [row for row in per_item_results if row.get("ok")]
+    if not successful:
+        errors = " | ".join(str(row.get("error") or "") for row in per_item_results[:3])
+        raise ValueError(f"news alignment model failed for every item: {errors}")
+
+    parsed = {
+        "daily_summary": "逐条生成数字“我”的新闻初判；每条新闻可单独校对并合并为 SelfCore 候选。",
+        "selected_news": [],
+        "calibration_candidates": [],
+        "rejected_or_risky": [],
+        "outbound_topic_signals": [],
+        "questions_for_user": [],
+        "partial_errors": [],
+        "generation_mode": "per_news_parallel",
+    }
+    for row in per_item_results:
+        if not row.get("ok"):
+            parsed["partial_errors"].append(
+                {
+                    "news_id": row.get("news_id"),
+                    "title": row.get("title"),
+                    "error": row.get("error"),
+                }
+            )
+            parsed["rejected_or_risky"].append(
+                f"{row.get('news_id') or row.get('title')}: 初判生成失败，需重试；{row.get('error')}"
+            )
+            continue
+        item_parsed = row.get("parsed") or {}
+        for key in ("selected_news", "calibration_candidates", "rejected_or_risky", "outbound_topic_signals", "questions_for_user"):
+            values = item_parsed.get(key) or []
+            if isinstance(values, list):
+                parsed[key].extend(values)
+        summary = str(item_parsed.get("daily_summary") or "").strip()
+        if summary:
+            parsed["questions_for_user"].append(f"{row.get('news_id')}: {summary}")
 
     record_id = f"news-align-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     record = {
@@ -2453,8 +3207,9 @@ def generate_news_alignment(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "news_items": news_items,
         "user_alignment": user_alignment,
+        "user_alignment_by_news_id": alignment_by_news_id,
         "analysis": parsed,
-        "raw_model_text": text,
+        "raw_model_results": per_item_results,
     }
     NEWS_ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
     record_path = NEWS_ALIGNMENT_DIR / f"{record_id}.json"
@@ -2465,6 +3220,95 @@ def generate_news_alignment(payload: dict[str, Any]) -> dict[str, Any]:
         "news_count": len(news_items),
         **parsed,
     }
+
+
+def build_news_candidate_merge_prompt(payload: dict[str, Any]) -> str:
+    news_item = payload.get("news_item") if isinstance(payload.get("news_item"), dict) else {}
+    analysis_item = payload.get("analysis_item") if isinstance(payload.get("analysis_item"), dict) else {}
+    user_alignment = str(payload.get("user_alignment") or "").strip()
+    return f"""你是数字“我”的 SelfCore 候选蒸馏器。任务不是把用户校对原样记录下来，而是把“新闻事实 + 数字我的初判 + 用户本人的校对”融合，重新生成可进入 SelfCore 候选池的结构化候选。
+
+当前 SelfCore 摘要：
+{compact_news_prompt_text(self_core_excerpt(), 2200)}
+
+已注入 SelfCore 的新闻对齐记忆摘要（未注入候选不得作为稳定依据）：
+{compact_news_prompt_text(confirmed_news_alignment_memory_excerpt(), 1000)}
+
+新闻事实：
+- news_id: {news_item.get("news_id") or ""}
+- title: {news_item.get("title") or ""}
+- source: {news_item.get("source") or ""}
+- tags: {news_item.get("tags") or ""}
+- summary: {compact_news_prompt_text(str(news_item.get("summary") or ""), 520)}
+- detail: {compact_news_prompt_text(str(news_item.get("detail") or ""), 900)}
+
+数字“我”的原初判：
+{json.dumps(analysis_item, ensure_ascii=False, indent=2)[:5000]}
+
+用户本人的校对/纠正：
+{user_alignment}
+
+只输出合法 JSON，不要 Markdown，不要解释。结构如下：
+{{
+  "candidate": "一条融合后的 SelfCore 候选。必须写成用户的稳定判断方式、价值排序、关注边界、表达偏好或短期主题信号；不能写成新闻事实本身，也不能只是复述用户原话。",
+  "target": "self_understanding|thinking_style|expression_style|communication_style|daily_topic|boundary|relationship_context",
+  "confidence": "low|medium|high",
+  "source_news_ids": ["{news_item.get("news_id") or ""}"],
+  "evidence": "说明融合了哪条新闻、数字我原判断、用户校对中的哪一点",
+  "delta_from_digital_self": "用户校对相对数字我初判，具体修正了哪种权重、边界、态度或表达力度",
+  "why_selfcore_relevant": "为什么这不是单条新闻观点，而值得进入候选池",
+  "needs_user_confirmation": true
+}}
+
+硬规则：
+- 必须以用户校对为最高优先级；数字我初判只能作为被修正的材料。
+- 不得把新闻候选池里的未注入候选当作 SelfCore 依据；如果当前 SelfCore 依据不足，要在候选中保持低置信度或标注为 daily_topic。
+- 不要新增独立的“用户说了什么”流水账；要综合生成更高一层的候选表述。
+- 如果用户校对只代表单日兴趣，不要硬写成长期三观，target 用 daily_topic，confidence 用 low/medium。
+- 如果用户校对明确修正了数字我的判断方式，candidate 要直接体现修正后的判断方式。
+- 候选应当简洁但有信息密度，通常 80-220 字。"""
+
+
+def generate_news_alignment_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    api_key = str(payload.get("poe_api_key") or "").strip()
+    if not api_key:
+        raise ValueError("poe_api_key is required for candidate merge")
+    model = str(payload.get("poe_model") or "GPT-4o").strip()
+    user_alignment = str(payload.get("user_alignment") or "").strip()
+    if not user_alignment:
+        raise ValueError("user_alignment is required for candidate merge")
+    prompt = build_news_candidate_merge_prompt(payload)
+    text, error_message = call_poe_model(
+        prompt,
+        api_key,
+        model,
+        system_prompt="你是严格的 SelfCore 候选蒸馏器，只输出合法 JSON；必须把用户校对和数字我初判融合成候选，而不是拼接原文。",
+        temperature=0.2,
+        timeout=75,
+    )
+    if not text:
+        raise ValueError(error_message or "candidate merge model returned no result")
+    parsed = parse_json_object(text)
+    if parsed is None:
+        raise ValueError("candidate merge model output is not valid JSON")
+    candidate = str(parsed.get("candidate") or "").strip()
+    if not candidate:
+        raise ValueError("candidate merge model returned empty candidate")
+    news_item = payload.get("news_item") if isinstance(payload.get("news_item"), dict) else {}
+    news_id = str(news_item.get("news_id") or "").strip()
+    parsed["candidate"] = candidate[:2000]
+    parsed["target"] = str(parsed.get("target") or "self_understanding").strip()
+    parsed["confidence"] = normalize_confirmed_confidence(str(parsed.get("confidence") or "medium"))
+    parsed["source_news_ids"] = [news_id] if news_id else [str(value) for value in parsed.get("source_news_ids") or [] if value]
+    parsed["evidence"] = str(parsed.get("evidence") or "").strip()[:1000]
+    parsed["needs_user_confirmation"] = True
+    parsed["created_by"] = "model_alignment_merge"
+    parsed["merge_engine"] = "poe"
+    parsed["model_called"] = True
+    parsed["model_name"] = model
+    parsed["model_call_at"] = datetime.now().isoformat(timespec="seconds")
+    parsed["raw_model_text"] = text
+    return parsed
 
 
 def confirm_news_alignment_candidates(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2497,6 +3341,10 @@ def confirm_news_alignment_candidates(payload: dict[str, Any]) -> dict[str, Any]
             "source_news_ids": [str(value) for value in item.get("source_news_ids") or [] if value],
             "evidence": str(item.get("evidence") or "").strip()[:1000],
             "confirmed_by_user": True,
+            "merge_engine": str(item.get("merge_engine") or "").strip()[:80],
+            "model_called": bool(item.get("model_called")),
+            "model_name": str(item.get("model_name") or "").strip()[:120],
+            "model_call_at": str(item.get("model_call_at") or "").strip()[:80],
         }
         memory_rows.append(row)
         normalized_confirmations.append(row)
@@ -3268,8 +4116,12 @@ def confirmed_multimodal_memory_excerpt(limit: int = 30) -> str:
 
 
 def confirmed_news_alignment_memory_excerpt(limit: int = 30) -> str:
+    # Only injected candidates are stable enough to be cited as SelfCore basis.
     if not NEWS_ALIGNMENT_MEMORY_PATH.exists():
-        return "（暂无已确认的新闻对齐记忆）"
+        return "（暂无已注入 SelfCore 的新闻对齐记忆）"
+    injected_ids = injected_selfcore_candidate_ids()
+    if not injected_ids:
+        return "（暂无已注入 SelfCore 的新闻对齐记忆）"
     lines = NEWS_ALIGNMENT_MEMORY_PATH.read_text(encoding="utf-8").splitlines()
     records: list[dict[str, Any]] = []
     for line in lines[-limit:]:
@@ -3277,7 +4129,7 @@ def confirmed_news_alignment_memory_excerpt(limit: int = 30) -> str:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(item, dict):
+        if isinstance(item, dict) and str(item.get("id") or "") in injected_ids:
             records.append(item)
     output = []
     for item in records:
@@ -3286,7 +4138,7 @@ def confirmed_news_alignment_memory_excerpt(limit: int = 30) -> str:
         candidate = str(item.get("candidate") or "").strip()
         if candidate:
             output.append(f"- [{target}/{confidence}] {candidate}")
-    return "\n".join(output) or "（暂无已确认的新闻对齐记忆）"
+    return "\n".join(output) or "（暂无已注入 SelfCore 的新闻对齐记忆）"
 
 
 def format_dyadic_profile(profile: dict[str, Any] | None) -> str:
@@ -3454,6 +4306,7 @@ def call_poe_model(
     model: str,
     system_prompt: str = "你只生成中文聊天草稿正文，不解释，不复述规则。",
     temperature: float = 0.75,
+    timeout: float = 45.0,
 ) -> tuple[str | None, str]:
     endpoint = os.environ.get(
         "DIGITAL_TWIN_LLM_ENDPOINT",
@@ -3484,7 +4337,7 @@ def call_poe_model(
     }
     req = request.Request(endpoint, data=body, headers=headers, method="POST")
     try:
-        with request.urlopen(req, timeout=45) as response:
+        with request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         detail = ""
@@ -3774,7 +4627,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/multimodal/diarized-asr",
             "/api/multimodal/diarized-asr-job",
             "/api/multimodal/confirm",
+            "/api/news-alignment/fetch",
             "/api/news-alignment/analyze",
+            "/api/news-alignment/merge-candidate",
             "/api/news-alignment/confirm",
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
@@ -3796,8 +4651,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = start_diarized_asr_job(payload)
             elif self.path == "/api/multimodal/confirm":
                 result = confirm_multimodal_candidates(payload)
+            elif self.path == "/api/news-alignment/fetch":
+                result = fetch_discussable_news(payload)
             elif self.path == "/api/news-alignment/analyze":
                 result = generate_news_alignment(payload)
+            elif self.path == "/api/news-alignment/merge-candidate":
+                result = generate_news_alignment_candidate(payload)
             elif self.path == "/api/news-alignment/confirm":
                 result = confirm_news_alignment_candidates(payload)
             elif self.path == "/api/speaker-profiles/enroll":

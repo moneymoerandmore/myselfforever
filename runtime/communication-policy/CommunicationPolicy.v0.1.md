@@ -20,6 +20,13 @@
 - [OutboundCommunicationPolicy.v0.1.md](OutboundCommunicationPolicy.v0.1.md)：对外主动/被动沟通、风险门控、草稿/发送边界。
 - [../self-alignment/NewsAlignmentPolicy.v0.1.md](../self-alignment/NewsAlignmentPolicy.v0.1.md)：每日新闻讨论、和我的校对、`Correction` / `PreferenceSignal` / `UpdateProposal` 等自进化输入。
 
+在新的“数字我”架构里，`CommunicationPolicy` 的对外部分属于表我层。它不只是“怎么说话”的规则，而是规定本我如何在不同社会关系中外显：
+
+- 对不同人，亲密度、默认背景、玩笑强度、直接程度、回复速度和主动频率都不同。
+- 对不同群，参与阈值、上下文容量、事实审计和自动发送边界都不同。
+- 对未映射成员，可以低风险接日常话，但不能使用私人称呼、关系假设或高亲密度表达。
+- 每次真我纠正“这不像我”时，要判断它是在修正本我，还是修正某段关系中的表我。
+
 ## 当前实现映射
 
 - 对外草稿生成：`apps/dashboard/server.py` 的 `/api/draft`
