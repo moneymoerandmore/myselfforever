@@ -137,7 +137,8 @@ function renderProviderStatus(status) {
   const sourceReady = Boolean(status.source_image?.configured && status.source_image?.exists);
   const ttsReady = Boolean(status.tts?.configured);
   const rendererReady = Boolean(status.renderer?.configured);
-  const allReady = sourceReady && ttsReady && rendererReady;
+  const lipsyncReady = Boolean(status.lipsync?.configured);
+  const allReady = sourceReady && ttsReady && rendererReady && lipsyncReady;
   providerBadge.textContent = allReady ? "可渲染" : "待配置";
   providerBadge.className = `mode-badge ${allReady ? "mode-ok" : "mode-warn"}`;
   providerSummary.textContent = allReady
@@ -159,6 +160,13 @@ function renderProviderStatus(status) {
       "LivePortrait",
       rendererReady,
       rendererReady ? "已配置 LIVEPORTRAIT_RENDER_COMMAND。" : "设置 LIVEPORTRAIT_RENDER_COMMAND，将头像图和音频转成 avatar.mp4。",
+    ),
+  );
+  providerGrid.append(
+    providerItem(
+      "LipSync",
+      lipsyncReady,
+      lipsyncReady ? "已配置 AVATAR_LIPSYNC_COMMAND。" : "设置 AVATAR_LIPSYNC_COMMAND，将底视频和音频同步成口型。",
     ),
   );
 }

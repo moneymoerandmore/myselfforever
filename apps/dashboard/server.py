@@ -590,6 +590,7 @@ def avatar_env_config() -> dict[str, str]:
                     "source_image_path": str(payload.get("source_image_path") or "").strip(),
                     "tts_command": str(payload.get("tts_command") or "").strip(),
                     "liveportrait_command": str(payload.get("liveportrait_command") or "").strip(),
+                    "lipsync_command": str(payload.get("lipsync_command") or "").strip(),
                 }
         except (OSError, json.JSONDecodeError):
             file_config = {}
@@ -600,6 +601,8 @@ def avatar_env_config() -> dict[str, str]:
         or file_config.get("tts_command", ""),
         "liveportrait_command": os.environ.get("LIVEPORTRAIT_RENDER_COMMAND", "").strip()
         or file_config.get("liveportrait_command", ""),
+        "lipsync_command": os.environ.get("AVATAR_LIPSYNC_COMMAND", "").strip()
+        or file_config.get("lipsync_command", ""),
     }
 
 
@@ -626,10 +629,21 @@ def avatar_layer_status() -> dict[str, Any]:
             "configured": bool(config["liveportrait_command"]),
             "env": "LIVEPORTRAIT_RENDER_COMMAND",
         },
+        "lipsync": {
+            "configured": bool(config["lipsync_command"]),
+            "env": "AVATAR_LIPSYNC_COMMAND",
+        },
         "contract": {
             "tts_placeholders": ["{text_path}", "{audio_path}", "{job_dir}"],
             "liveportrait_placeholders": [
                 "{image_path}",
+                "{audio_path}",
+                "{text_path}",
+                "{output_path}",
+                "{job_dir}",
+            ],
+            "lipsync_placeholders": [
+                "{video_path}",
                 "{audio_path}",
                 "{text_path}",
                 "{output_path}",
@@ -714,6 +728,7 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     text_path = job_dir / "reply.txt"
     audio_path = job_dir / "reply.wav"
     output_path = job_dir / "avatar.mp4"
+    render_output_path = job_dir / ("avatar_base.mp4" if config["lipsync_command"] else "avatar.mp4")
     source_image = Path(config["source_image_path"]) if config["source_image_path"] else None
     job = {
         "id": job_id,
@@ -733,6 +748,7 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             "source_image_path": str(source_image) if source_image else "",
             "tts_configured": bool(config["tts_command"]),
             "renderer_configured": bool(config["liveportrait_command"]),
+            "lipsync_configured": bool(config["lipsync_command"]),
         },
     }
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -755,7 +771,7 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         "image_path": source_image,
         "text_path": text_path,
         "audio_path": audio_path,
-        "output_path": output_path,
+        "output_path": render_output_path,
         "job_dir": job_dir,
     }
     tts_command = format_avatar_command(config["tts_command"], paths)
@@ -790,11 +806,37 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         write_avatar_job(job_dir, job)
         return job
     job["steps"].append({"name": "liveportrait", **render_result})
-    if render_result["returncode"] != 0 or not output_path.exists():
+    if render_result["returncode"] != 0 or not render_output_path.exists():
         job["status"] = "render_failed"
         job["message"] = "LivePortrait command failed or did not create avatar.mp4."
         write_avatar_job(job_dir, job)
         return job
+    if render_output_path != output_path:
+        job["files"]["base_video"] = f"/api/avatar/jobs/{job_id}/files/{render_output_path.name}"
+
+    if config["lipsync_command"]:
+        lipsync_paths = {
+            "video_path": render_output_path,
+            "image_path": source_image,
+            "text_path": text_path,
+            "audio_path": audio_path,
+            "output_path": output_path,
+            "job_dir": job_dir,
+        }
+        lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
+        try:
+            lipsync_result = run_avatar_command(lipsync_command, job_dir)
+        except subprocess.TimeoutExpired:
+            job["status"] = "lipsync_timeout"
+            job["message"] = "Lip-sync command timed out."
+            write_avatar_job(job_dir, job)
+            return job
+        job["steps"].append({"name": "lipsync", **lipsync_result})
+        if lipsync_result["returncode"] != 0 or not output_path.exists():
+            job["status"] = "lipsync_failed"
+            job["message"] = "Lip-sync command failed or did not create avatar.mp4."
+            write_avatar_job(job_dir, job)
+            return job
     job["status"] = "completed"
     job["message"] = "Avatar video rendered."
     job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
