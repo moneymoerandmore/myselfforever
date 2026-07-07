@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -49,6 +50,9 @@ SPEAKER_PROFILE_PATH = SPEAKER_PROFILE_DIR / "profiles.json"
 SELFCORE_MERGE_DIR = ROOT / "data" / "generated" / "selfcore-candidate-merges"
 SELFCORE_INJECTION_DIR = ROOT / "data" / "generated" / "selfcore-injections"
 SELFCORE_INJECTION_LOG_PATH = ROOT / "runtime" / "self-core" / "candidate-injections.jsonl"
+AVATAR_LAYER_DIR = ROOT / "data" / "generated" / "avatar-layer"
+AVATAR_ASSET_DIR = ROOT / "runtime" / "avatar-layer"
+AVATAR_CONFIG_PATH = AVATAR_ASSET_DIR / "config.json"
 MAX_MULTIMODAL_FILES = 36
 MAX_IMAGE_DATA_URL_CHARS = 900_000
 MAX_TOTAL_DATA_URL_CHARS = 8_000_000
@@ -574,6 +578,228 @@ def apply_trusted_group_risk(result: dict[str, Any]) -> None:
     result["risk_level"] = level
     result["approval_required"] = level not in {"R0_safe", "R1_low"}
     result["questions_for_user"].extend(reasons)
+
+
+def avatar_env_config() -> dict[str, str]:
+    file_config: dict[str, str] = {}
+    if AVATAR_CONFIG_PATH.exists():
+        try:
+            payload = json.loads(AVATAR_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                file_config = {
+                    "source_image_path": str(payload.get("source_image_path") or "").strip(),
+                    "tts_command": str(payload.get("tts_command") or "").strip(),
+                    "liveportrait_command": str(payload.get("liveportrait_command") or "").strip(),
+                }
+        except (OSError, json.JSONDecodeError):
+            file_config = {}
+    return {
+        "source_image_path": os.environ.get("DIGITAL_TWIN_AVATAR_IMAGE", "").strip()
+        or file_config.get("source_image_path", ""),
+        "tts_command": os.environ.get("DIGITAL_TWIN_TTS_COMMAND", "").strip()
+        or file_config.get("tts_command", ""),
+        "liveportrait_command": os.environ.get("LIVEPORTRAIT_RENDER_COMMAND", "").strip()
+        or file_config.get("liveportrait_command", ""),
+    }
+
+
+def avatar_layer_status() -> dict[str, Any]:
+    config = avatar_env_config()
+    source_path = Path(config["source_image_path"]) if config["source_image_path"] else None
+    return {
+        "layer": "external_interaction.avatar",
+        "provider": "liveportrait_local",
+        "phase": "stage_1_text_to_avatar",
+        "output_dir": str(AVATAR_LAYER_DIR),
+        "asset_dir": str(AVATAR_ASSET_DIR),
+        "config_path": str(AVATAR_CONFIG_PATH),
+        "source_image": {
+            "configured": bool(source_path),
+            "path": str(source_path) if source_path else "",
+            "exists": bool(source_path and source_path.exists()),
+        },
+        "tts": {
+            "configured": bool(config["tts_command"]),
+            "env": "DIGITAL_TWIN_TTS_COMMAND",
+        },
+        "renderer": {
+            "configured": bool(config["liveportrait_command"]),
+            "env": "LIVEPORTRAIT_RENDER_COMMAND",
+        },
+        "contract": {
+            "tts_placeholders": ["{text_path}", "{audio_path}", "{job_dir}"],
+            "liveportrait_placeholders": [
+                "{image_path}",
+                "{audio_path}",
+                "{text_path}",
+                "{output_path}",
+                "{job_dir}",
+            ],
+        },
+    }
+
+
+def recent_avatar_jobs(limit: int = 20) -> list[dict[str, Any]]:
+    if not AVATAR_LAYER_DIR.exists():
+        return []
+    jobs: list[dict[str, Any]] = []
+    for meta_path in AVATAR_LAYER_DIR.glob("*/job.json"):
+        try:
+            jobs.append(json.loads(meta_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    jobs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return jobs[:limit]
+
+
+def avatar_job_file(job_id: str, filename: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", job_id or ""):
+        raise ValueError("invalid avatar job id")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", filename or ""):
+        raise ValueError("invalid avatar file name")
+    path = (AVATAR_LAYER_DIR / job_id / filename).resolve()
+    root = AVATAR_LAYER_DIR.resolve()
+    if root not in path.parents:
+        raise ValueError("invalid avatar file path")
+    return path
+
+
+def write_avatar_job(job_dir: Path, job: dict[str, Any]) -> None:
+    job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(job, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def format_avatar_command(template: str, paths: dict[str, Path]) -> str:
+    values = {name: str(path) for name, path in paths.items()}
+    return template.format(**values)
+
+
+def run_avatar_command(command: str, cwd: Path, timeout_seconds: int = 900) -> dict[str, Any]:
+    started = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(cwd),
+        shell=True,
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+    )
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    return {
+        "command": command,
+        "returncode": completed.returncode,
+        "duration_seconds": round(time.time() - started, 2),
+        "stdout": stdout[-4000:],
+        "stderr": stderr[-4000:],
+    }
+
+
+def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
+    draft_text = str(payload.get("draft_text") or "").strip()
+    draft_result: dict[str, Any] | None = None
+    if not draft_text:
+        draft_result = generate_draft(payload)
+        draft_text = str(draft_result.get("draft_text") or "").strip()
+    if not draft_text:
+        raise ValueError("draft_text is required or draft generation must produce text")
+
+    config = avatar_env_config()
+    job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    job_dir = AVATAR_LAYER_DIR / job_id
+    text_path = job_dir / "reply.txt"
+    audio_path = job_dir / "reply.wav"
+    output_path = job_dir / "avatar.mp4"
+    source_image = Path(config["source_image_path"]) if config["source_image_path"] else None
+    job = {
+        "id": job_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": "liveportrait_local",
+        "phase": "stage_1_text_to_avatar",
+        "status": "created",
+        "person_query": str(payload.get("query") or "").strip(),
+        "scenario": str(payload.get("scenario") or "").strip(),
+        "draft_text": draft_text,
+        "draft_result": draft_result,
+        "files": {
+            "text": f"/api/avatar/jobs/{job_id}/files/reply.txt",
+        },
+        "steps": [],
+        "config": {
+            "source_image_path": str(source_image) if source_image else "",
+            "tts_configured": bool(config["tts_command"]),
+            "renderer_configured": bool(config["liveportrait_command"]),
+        },
+    }
+    job_dir.mkdir(parents=True, exist_ok=True)
+    text_path.write_text(draft_text, encoding="utf-8")
+    write_avatar_job(job_dir, job)
+
+    if not source_image or not source_image.exists():
+        job["status"] = "needs_source_image"
+        job["message"] = "Set DIGITAL_TWIN_AVATAR_IMAGE to a local portrait image before rendering."
+        write_avatar_job(job_dir, job)
+        return job
+
+    if not config["tts_command"]:
+        job["status"] = "needs_tts"
+        job["message"] = "Set DIGITAL_TWIN_TTS_COMMAND to create reply.wav from reply.txt."
+        write_avatar_job(job_dir, job)
+        return job
+
+    paths = {
+        "image_path": source_image,
+        "text_path": text_path,
+        "audio_path": audio_path,
+        "output_path": output_path,
+        "job_dir": job_dir,
+    }
+    tts_command = format_avatar_command(config["tts_command"], paths)
+    try:
+        tts_result = run_avatar_command(tts_command, job_dir)
+    except subprocess.TimeoutExpired:
+        job["status"] = "tts_timeout"
+        job["message"] = "TTS command timed out."
+        write_avatar_job(job_dir, job)
+        return job
+    job["steps"].append({"name": "tts", **tts_result})
+    if tts_result["returncode"] != 0 or not audio_path.exists():
+        job["status"] = "tts_failed"
+        job["message"] = "TTS command failed or did not create reply.wav."
+        write_avatar_job(job_dir, job)
+        return job
+    job["files"]["audio"] = f"/api/avatar/jobs/{job_id}/files/reply.wav"
+    write_avatar_job(job_dir, job)
+
+    if not config["liveportrait_command"]:
+        job["status"] = "needs_liveportrait"
+        job["message"] = "Set LIVEPORTRAIT_RENDER_COMMAND to create avatar.mp4 from the portrait and audio."
+        write_avatar_job(job_dir, job)
+        return job
+
+    render_command = format_avatar_command(config["liveportrait_command"], paths)
+    try:
+        render_result = run_avatar_command(render_command, job_dir)
+    except subprocess.TimeoutExpired:
+        job["status"] = "render_timeout"
+        job["message"] = "LivePortrait command timed out."
+        write_avatar_job(job_dir, job)
+        return job
+    job["steps"].append({"name": "liveportrait", **render_result})
+    if render_result["returncode"] != 0 or not output_path.exists():
+        job["status"] = "render_failed"
+        job["message"] = "LivePortrait command failed or did not create avatar.mp4."
+        write_avatar_job(job_dir, job)
+        return job
+    job["status"] = "completed"
+    job["message"] = "Avatar video rendered."
+    job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
+    write_avatar_job(job_dir, job)
+    return job
 
 
 def parse_json_object(value: str) -> dict[str, Any] | None:
@@ -4584,6 +4810,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/news-alignment.css":
             self.serve_file(DASHBOARD_DIR / "news-alignment.css")
             return
+        if path == "/avatar.html":
+            self.serve_file(DASHBOARD_DIR / "avatar.html")
+            return
+        if path == "/avatar.js":
+            self.serve_file(DASHBOARD_DIR / "avatar.js")
+            return
+        if path == "/avatar.css":
+            self.serve_file(DASHBOARD_DIR / "avatar.css")
+            return
         if path == "/app.js":
             self.serve_file(DASHBOARD_DIR / "app.js")
             return
@@ -4610,6 +4845,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/speaker-profiles":
             self.send_json({"ok": True, "result": list_speaker_profiles()})
             return
+        if path == "/api/avatar/status":
+            self.send_json({"ok": True, "result": avatar_layer_status()})
+            return
+        if path == "/api/avatar/jobs":
+            limit = int((query.get("limit") or ["20"])[0])
+            self.send_json({"ok": True, "result": {"jobs": recent_avatar_jobs(limit)}})
+            return
+        if path.startswith("/api/avatar/jobs/") and "/files/" in path:
+            try:
+                _, remainder = path.split("/api/avatar/jobs/", 1)
+                job_id, filename = remainder.split("/files/", 1)
+                self.serve_file(avatar_job_file(job_id, filename))
+            except Exception:
+                self.send_error(404)
+            return
         if path.startswith("/api/multimodal/asr-jobs/"):
             job_id = path.rsplit("/", 1)[-1]
             try:
@@ -4634,6 +4884,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
+            "/api/avatar/reply",
         }:
             self.send_error(404)
             return
@@ -4665,6 +4916,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = merge_selfcore_candidates(payload)
             elif self.path == "/api/selfcore-candidates/inject":
                 result = inject_selfcore_proposals(payload)
+            elif self.path == "/api/avatar/reply":
+                result = create_avatar_reply(payload)
             else:
                 result = generate_multimodal_intake(payload)
         except Exception as exc:  # Keep local UI errors readable.

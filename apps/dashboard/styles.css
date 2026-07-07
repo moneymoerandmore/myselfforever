@@ -67,6 +67,28 @@ textarea {
   font-size: 14px;
 }
 
+.top-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.top-links a {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 6px 9px;
+  text-decoration: none;
+}
+
+.top-links a:hover {
+  border-color: rgba(15, 118, 110, 0.35);
+  color: var(--accent);
+}
+
 .key-field,
 .model-field {
   min-width: 0;

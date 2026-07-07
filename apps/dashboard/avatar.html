@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>数字人形象 · 数字分身</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/avatar.css" />
+  </head>
+  <body>
+    <main class="shell avatar-shell">
+      <header class="topbar">
+        <div>
+          <h1>数字人形象</h1>
+          <p>第五层 · 对外交互层 · LivePortrait 本地方案</p>
+          <nav class="top-links" aria-label="Dashboard 页面">
+            <a href="/">关系 / 群监控</a>
+            <a href="/avatar.html">数字人形象</a>
+            <a href="/multimodal.html">多模态摄入</a>
+            <a href="/news-alignment.html">新闻对齐</a>
+          </nav>
+        </div>
+        <div class="top-controls avatar-top-controls">
+          <label class="key-field">
+            <span>Poe API Key</span>
+            <div class="key-input-row">
+              <input id="poeApiKey" type="password" autocomplete="off" placeholder="pkey-..." />
+              <button type="button" class="key-clear" id="clearPoeApiKey">清除</button>
+            </div>
+          </label>
+          <label class="model-field">
+            <span>模型</span>
+            <input id="poeModel" autocomplete="off" value="Claude-Sonnet-4" />
+          </label>
+          <div class="status" id="healthStatus">连接中</div>
+        </div>
+      </header>
+
+      <section class="avatar-layout">
+        <aside class="avatar-card avatar-control-panel">
+          <div class="avatar-section-head">
+            <div>
+              <h2>输入</h2>
+              <p>选一个人，输入 TA 的内容，数字我生成回复后交给本地形象层。</p>
+            </div>
+          </div>
+
+          <label>
+            <span>选择联系人</span>
+            <select id="personSelect">
+              <option value="">加载关系链中...</option>
+            </select>
+          </label>
+
+          <div class="field-grid">
+            <label>
+              <span>意图</span>
+              <select id="intent">
+                <option value="casual_chat">闲聊</option>
+                <option value="work_discussion">工作讨论</option>
+                <option value="news_discussion">新闻讨论</option>
+                <option value="decision_request">决策判断</option>
+                <option value="emotional_support">安慰支持</option>
+                <option value="investment_discussion">投资讨论</option>
+                <option value="logistics">事务确认</option>
+              </select>
+            </label>
+            <label>
+              <span>模式</span>
+              <select id="mode">
+                <option value="draft">草稿</option>
+                <option value="observe">观察</option>
+                <option value="assist_send">确认后发送</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            <span>对方输入</span>
+            <textarea id="scenario" rows="7" placeholder="输入对方发来的话。第一阶段是文字输入；第二阶段会换成麦克风 + 摄像头。"></textarea>
+          </label>
+
+          <label>
+            <span>已有上下文，可选</span>
+            <textarea id="contextText" rows="5" placeholder="一行一条，例如：&#10;对方：这个方案靠谱么&#10;我：先看目标和代价"></textarea>
+          </label>
+
+          <div class="actions avatar-actions">
+            <button type="button" class="ghost" id="refreshButton">刷新状态</button>
+            <button type="button" id="renderButton">生成数字人回复</button>
+          </div>
+        </aside>
+
+        <section class="avatar-main">
+          <section class="avatar-card">
+            <div class="avatar-section-head">
+              <div>
+                <h2>本地形象层状态</h2>
+                <p id="providerSummary">正在读取配置。</p>
+              </div>
+              <span class="mode-badge" id="providerBadge">--</span>
+            </div>
+            <div class="avatar-status-grid" id="providerGrid"></div>
+          </section>
+
+          <section class="avatar-card avatar-stage-card">
+            <div class="avatar-section-head">
+              <div>
+                <h2>数字人输出</h2>
+                <p id="jobSummary">还没有生成任务。</p>
+              </div>
+              <span class="risk risk-idle" id="jobBadge">--</span>
+            </div>
+            <video id="avatarVideo" class="avatar-video" controls playsinline hidden></video>
+            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本和渲染状态会出现在这里。</pre>
+          </section>
+
+          <section class="avatar-card">
+            <div class="avatar-section-head">
+              <div>
+                <h2>最近任务</h2>
+                <p>记录本地生成任务，方便排查 TTS / LivePortrait 链路。</p>
+              </div>
+            </div>
+            <div class="avatar-jobs" id="jobsList"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/avatar.js"></script>
+  </body>
+</html>
