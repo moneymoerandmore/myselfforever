@@ -125,6 +125,7 @@ function renderNewsBrowser() {
         item.title ? `标题：${item.title}` : "",
         item.tags ? `标签：${item.tags}` : "",
         item.interest_category_label ? `兴趣类别：${item.interest_category_label}` : "",
+        item.priority_interest_labels ? `强兴趣信号：${item.priority_interest_labels}` : "",
         item.published_at ? `时间：${item.published_at}` : "",
         item.source ? `来源：${item.source}` : "",
         item.source_url ? `来源站点：${item.source_url}` : "",

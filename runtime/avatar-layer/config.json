@@ -1,6 +1,11 @@
 {
   "source_image_path": "D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\portrait.jpg",
+  "base_video_path": "D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\cache\\base_idle.mp4",
+  "tts_worker_url": "http://127.0.0.1:8811",
   "tts_command": "cd /d D:\\AI\\index-tts && C:\\Users\\cloud\\.local\\bin\\uv.exe run python D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\indextts2_adapter.py --repo D:\\AI\\index-tts --voice D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\voice_ref.wav --text {text_path} --out {audio_path} --fp16",
   "liveportrait_command": "C:\\Users\\cloud\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\liveportrait_adapter.py --repo D:\\AI\\LivePortrait --image {image_path} --audio {audio_path} --out {output_path}",
+  "lipsync_worker_url": "http://127.0.0.1:8812",
+  "lipsync_mode": "realtime",
+  "realtime_avatar_id": "digital_twin",
   "lipsync_command": "C:\\Users\\cloud\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe D:\\Users\\cloud\\Documents\\数字永生\\runtime\\avatar-layer\\musetalk_adapter.py --repo D:\\AI\\MuseTalk --video {video_path} --audio {audio_path} --out {output_path} --batch-size 2"
 }

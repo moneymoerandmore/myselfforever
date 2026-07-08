@@ -22,12 +22,13 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib import error, request
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from uuid import uuid4
 
 
@@ -63,6 +64,7 @@ pyannote_embedding_inferences: dict[str, Any] = {}
 asr_jobs: dict[str, dict[str, Any]] = {}
 asr_jobs_lock = threading.Lock()
 asr_job_executor = ThreadPoolExecutor(max_workers=1)
+avatar_job_executor = ThreadPoolExecutor(max_workers=1)
 TOPIC_LABELS = {
     "ai_technology": "AI与技术",
     "work_organization": "工作与组织",
@@ -133,6 +135,51 @@ NEWS_ALIGNMENT_FEEDS = [
     },
 ]
 
+NEWS_INTEREST_RADAR_QUERIES = [
+    {
+        "slug": "radar-us-chip-market",
+        "source": "中文兴趣雷达",
+        "topic": "投资 / 市场 / 半导体",
+        "query": "美股 半导体 芯片 英伟达 AMD 美光 下跌 暴跌 回调",
+    },
+    {
+        "slug": "radar-ai-capex",
+        "source": "中文兴趣雷达",
+        "topic": "AI / 资本开支 / 估值",
+        "query": "AI 资本开支 估值 泡沫 科技股 半导体",
+    },
+    {
+        "slug": "radar-china-tech-competition",
+        "source": "中文兴趣雷达",
+        "topic": "中美 / 科技竞争 / 产业链",
+        "query": "中美 科技竞争 芯片 出口管制 国产替代 AI",
+    },
+    {
+        "slug": "radar-macro-market",
+        "source": "中文兴趣雷达",
+        "topic": "投资 / 宏观 / 市场",
+        "query": "美股 纳斯达克 科技股 利率 通胀 市场 回调",
+    },
+    {
+        "slug": "radar-business-org",
+        "source": "中文兴趣雷达",
+        "topic": "商业 / 公司 / 组织治理",
+        "query": "公司 裁员 融资 并购 组织 管理 创业 争议",
+    },
+]
+
+for radar in NEWS_INTEREST_RADAR_QUERIES:
+    NEWS_ALIGNMENT_FEEDS.append(
+        {
+            "slug": radar["slug"],
+            "source": radar["source"],
+            "topic": radar["topic"],
+            "url": f"https://news.google.com/rss/search?q={quote(radar['query'])}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+            "interest_radar": True,
+            "prefer_chinese": True,
+        }
+    )
+
 NEWS_DISCUSSION_KEYWORDS = {
     "争议": 5,
     "分歧": 5,
@@ -158,6 +205,19 @@ NEWS_DISCUSSION_KEYWORDS = {
     "AI": 3,
     "大模型": 3,
     "Agent": 3,
+    "半导体": 5,
+    "芯片": 5,
+    "英伟达": 5,
+    "Nvidia": 5,
+    "AMD": 4,
+    "Micron": 4,
+    "Intel": 4,
+    "SOX": 5,
+    "semiconductor": 5,
+    "chip": 4,
+    "selloff": 5,
+    "plunge": 5,
+    "tumble": 4,
     "房价": 3,
     "楼市": 3,
     "股票": 3,
@@ -186,6 +246,17 @@ NEWS_CONFLICT_KEYWORDS = {
     "亏损": 4,
     "下跌": 4,
     "上涨": 3,
+    "selloff": 6,
+    "plunge": 6,
+    "tumble": 5,
+    "slump": 5,
+    "drop": 4,
+    "falls": 4,
+    "decline": 4,
+    "correction": 4,
+    "overvalued": 5,
+    "valuation": 4,
+    "bubble": 5,
     "平台税": 5,
     "反垄断": 5,
     "未成年人": 5,
@@ -212,13 +283,14 @@ NEWS_CONFLICT_KEYWORDS = {
 
 NEWS_MIN_CONFLICT_SCORE = 4
 NEWS_MODEL_CANDIDATE_POOL_SIZE = 60
+NEWS_CODE_CANDIDATE_POOL_SIZE = 18
 
 NEWS_ALIGNMENT_INTEREST_CATEGORIES = [
     {
         "id": "ai_tech_product",
         "label": "AI / 技术路线 / 产品竞争",
         "quota": 2,
-        "keywords": ["AI", "人工智能", "大模型", "Agent", "算力", "芯片", "机器人", "自动驾驶", "模型", "OpenAI", "英伟达", "苹果", "特斯拉", "产品"],
+        "keywords": ["AI", "人工智能", "大模型", "Agent", "算力", "芯片", "半导体", "semiconductor", "chip", "Nvidia", "英伟达", "AMD", "Micron", "Intel", "机器人", "自动驾驶", "模型", "OpenAI", "苹果", "特斯拉", "产品"],
     },
     {
         "id": "business_org",
@@ -230,7 +302,7 @@ NEWS_ALIGNMENT_INTEREST_CATEGORIES = [
         "id": "market_macro",
         "label": "投资 / 市场 / 宏观",
         "quota": 1,
-        "keywords": ["股", "债", "汇率", "利率", "通胀", "宏观", "央行", "房价", "楼市", "市场", "投资", "基金", "黄金", "美元"],
+        "keywords": ["股", "美股", "Nasdaq", "S&P", "SOX", "SOXX", "PHLX", "半导体指数", "债", "汇率", "利率", "通胀", "宏观", "央行", "房价", "楼市", "市场", "投资", "基金", "黄金", "美元", "selloff", "plunge", "tumble", "drop"],
     },
     {
         "id": "geopolitics",
@@ -261,6 +333,58 @@ NEWS_ALIGNMENT_INTEREST_CATEGORIES = [
         "label": "反常识 / 盲区 / 价值观冲突",
         "quota": 1,
         "keywords": ["反常识", "争议", "分歧", "质疑", "反对", "风险", "不平等", "责任", "伦理", "边界", "代价"],
+    },
+]
+
+NEWS_PRIORITY_INTEREST_RULES = [
+    {
+        "id": "us_semiconductor_market_shock",
+        "label": "美股半导体/AI硬件市场异动",
+        "category": "market_macro",
+        "boost": 24,
+        "topic_keywords": [
+            "半导体",
+            "芯片",
+            "semiconductor",
+            "chip",
+            "SOX",
+            "SOXX",
+            "PHLX",
+            "英伟达",
+            "Nvidia",
+            "AMD",
+            "Micron",
+            "Intel",
+            "Marvell",
+            "Samsung",
+            "SanDisk",
+            "memory",
+            "AI hardware",
+        ],
+        "market_keywords": [
+            "暴跌",
+            "大跌",
+            "下跌",
+            "重挫",
+            "跳水",
+            "回调",
+            "selloff",
+            "plunge",
+            "tumble",
+            "drop",
+            "slump",
+            "falls",
+            "decline",
+            "correction",
+        ],
+    },
+    {
+        "id": "ai_capex_valuation_cycle",
+        "label": "AI资本开支/估值周期分歧",
+        "category": "market_macro",
+        "boost": 18,
+        "topic_keywords": ["AI", "人工智能", "capex", "资本开支", "估值", "泡沫", "Magnificent Seven", "科技股", "semiconductor", "chip"],
+        "market_keywords": ["质疑", "分歧", "警告", "过热", "overvalued", "valuation", "bubble", "warning", "selloff", "回调"],
     },
 ]
 
@@ -588,27 +712,43 @@ def avatar_env_config() -> dict[str, str]:
             if isinstance(payload, dict):
                 file_config = {
                     "source_image_path": str(payload.get("source_image_path") or "").strip(),
+                    "base_video_path": str(payload.get("base_video_path") or "").strip(),
                     "tts_command": str(payload.get("tts_command") or "").strip(),
+                    "tts_worker_url": str(payload.get("tts_worker_url") or "").strip(),
                     "liveportrait_command": str(payload.get("liveportrait_command") or "").strip(),
                     "lipsync_command": str(payload.get("lipsync_command") or "").strip(),
+                    "lipsync_worker_url": str(payload.get("lipsync_worker_url") or "").strip(),
+                    "lipsync_mode": str(payload.get("lipsync_mode") or "").strip(),
+                    "realtime_avatar_id": str(payload.get("realtime_avatar_id") or "").strip(),
                 }
         except (OSError, json.JSONDecodeError):
             file_config = {}
     return {
         "source_image_path": os.environ.get("DIGITAL_TWIN_AVATAR_IMAGE", "").strip()
         or file_config.get("source_image_path", ""),
+        "base_video_path": os.environ.get("DIGITAL_TWIN_AVATAR_BASE_VIDEO", "").strip()
+        or file_config.get("base_video_path", ""),
         "tts_command": os.environ.get("DIGITAL_TWIN_TTS_COMMAND", "").strip()
         or file_config.get("tts_command", ""),
+        "tts_worker_url": os.environ.get("DIGITAL_TWIN_TTS_WORKER_URL", "").strip()
+        or file_config.get("tts_worker_url", ""),
         "liveportrait_command": os.environ.get("LIVEPORTRAIT_RENDER_COMMAND", "").strip()
         or file_config.get("liveportrait_command", ""),
         "lipsync_command": os.environ.get("AVATAR_LIPSYNC_COMMAND", "").strip()
         or file_config.get("lipsync_command", ""),
+        "lipsync_worker_url": os.environ.get("AVATAR_LIPSYNC_WORKER_URL", "").strip()
+        or file_config.get("lipsync_worker_url", ""),
+        "lipsync_mode": os.environ.get("AVATAR_LIPSYNC_MODE", "").strip()
+        or file_config.get("lipsync_mode", ""),
+        "realtime_avatar_id": os.environ.get("AVATAR_REALTIME_ID", "").strip()
+        or file_config.get("realtime_avatar_id", "digital_twin"),
     }
 
 
 def avatar_layer_status() -> dict[str, Any]:
     config = avatar_env_config()
     source_path = Path(config["source_image_path"]) if config["source_image_path"] else None
+    base_video_path = Path(config["base_video_path"]) if config["base_video_path"] else None
     return {
         "layer": "external_interaction.avatar",
         "provider": "liveportrait_local",
@@ -621,17 +761,31 @@ def avatar_layer_status() -> dict[str, Any]:
             "path": str(source_path) if source_path else "",
             "exists": bool(source_path and source_path.exists()),
         },
+        "base_video": {
+            "configured": bool(base_video_path),
+            "path": str(base_video_path) if base_video_path else "",
+            "exists": bool(base_video_path and base_video_path.exists()),
+            "note": "When configured, per-message LivePortrait rendering is skipped.",
+        },
         "tts": {
-            "configured": bool(config["tts_command"]),
-            "env": "DIGITAL_TWIN_TTS_COMMAND",
+            "configured": bool(config["tts_command"] or config["tts_worker_url"]),
+            "command_configured": bool(config["tts_command"]),
+            "worker_url": config["tts_worker_url"],
+            "worker": probe_avatar_worker(config["tts_worker_url"]),
+            "env": "DIGITAL_TWIN_TTS_COMMAND / DIGITAL_TWIN_TTS_WORKER_URL",
         },
         "renderer": {
             "configured": bool(config["liveportrait_command"]),
             "env": "LIVEPORTRAIT_RENDER_COMMAND",
         },
         "lipsync": {
-            "configured": bool(config["lipsync_command"]),
-            "env": "AVATAR_LIPSYNC_COMMAND",
+            "configured": bool(config["lipsync_command"] or config["lipsync_worker_url"]),
+            "command_configured": bool(config["lipsync_command"]),
+            "worker_url": config["lipsync_worker_url"],
+            "worker": probe_avatar_worker(config["lipsync_worker_url"]),
+            "mode": config["lipsync_mode"] or "normal",
+            "realtime_avatar_id": config["realtime_avatar_id"],
+            "env": "AVATAR_LIPSYNC_COMMAND / AVATAR_LIPSYNC_WORKER_URL",
         },
         "contract": {
             "tts_placeholders": ["{text_path}", "{audio_path}", "{job_dir}"],
@@ -669,13 +823,30 @@ def recent_avatar_jobs(limit: int = 20) -> list[dict[str, Any]]:
 def avatar_job_file(job_id: str, filename: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", job_id or ""):
         raise ValueError("invalid avatar job id")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", filename or ""):
+    if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", filename or "") or ".." in filename:
         raise ValueError("invalid avatar file name")
     path = (AVATAR_LAYER_DIR / job_id / filename).resolve()
     root = AVATAR_LAYER_DIR.resolve()
     if root not in path.parents:
         raise ValueError("invalid avatar file path")
     return path
+
+
+def avatar_job_dir(job_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", job_id or ""):
+        raise ValueError("invalid avatar job id")
+    path = (AVATAR_LAYER_DIR / job_id).resolve()
+    root = AVATAR_LAYER_DIR.resolve()
+    if path != root and root not in path.parents:
+        raise ValueError("invalid avatar job path")
+    return path
+
+
+def get_avatar_job(job_id: str) -> dict[str, Any]:
+    meta_path = avatar_job_dir(job_id) / "job.json"
+    if not meta_path.exists():
+        raise FileNotFoundError("avatar job not found")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
 def write_avatar_job(job_dir: Path, job: dict[str, Any]) -> None:
@@ -713,6 +884,234 @@ def run_avatar_command(command: str, cwd: Path, timeout_seconds: int = 900) -> d
     }
 
 
+def avatar_worker_url(base_url: str, path: str) -> str:
+    return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def probe_avatar_worker(base_url: str) -> dict[str, Any]:
+    if not base_url:
+        return {"configured": False, "ok": False}
+    try:
+        req = request.Request(avatar_worker_url(base_url, "/health"), method="GET")
+        with request.urlopen(req, timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return {"configured": True, "ok": bool(payload.get("ok")), "result": payload}
+    except Exception as exc:
+        return {"configured": True, "ok": False, "error": str(exc)}
+
+
+def call_avatar_worker(
+    base_url: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    timeout_seconds: int = 900,
+) -> dict[str, Any]:
+    started = time.time()
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        avatar_worker_url(base_url, endpoint),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with request.urlopen(req, timeout=timeout_seconds) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error") or "avatar worker failed"))
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    return {
+        "worker_url": base_url,
+        "returncode": 0,
+        "duration_seconds": round(time.time() - started, 2),
+        "worker_result": result,
+    }
+
+
+def call_lipsync_worker(
+    config: dict[str, str],
+    render_output_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    job_dir: Path,
+) -> dict[str, Any]:
+    mode = (config.get("lipsync_mode") or "").strip().lower()
+    if mode == "realtime":
+        result = call_avatar_worker(
+            config["lipsync_worker_url"],
+            "/realtime-lipsync",
+            {
+                "avatar_id": config.get("realtime_avatar_id") or "digital_twin",
+                "video_path": str(render_output_path),
+                "audio_path": str(audio_path),
+                "output_path": str(output_path),
+                "job_dir": str(job_dir),
+                "fps": 25,
+            },
+        )
+        result["mode"] = "worker_realtime"
+        return result
+    result = call_avatar_worker(
+        config["lipsync_worker_url"],
+        "/lipsync",
+        {
+            "video_path": str(render_output_path),
+            "audio_path": str(audio_path),
+            "output_path": str(output_path),
+            "job_dir": str(job_dir),
+        },
+    )
+    result["mode"] = "worker"
+    return result
+
+
+def split_avatar_text_chunks(text: str, max_chars: int = 12) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized:
+        return []
+    pieces = [
+        item.strip()
+        for item in re.split(r"(?<=[。！？!?；;，,、])\s*", normalized)
+        if item.strip()
+    ]
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces or [normalized]:
+        if len(piece) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for index in range(0, len(piece), max_chars):
+                chunks.append(piece[index : index + max_chars].strip())
+            continue
+        if current and len(current) + len(piece) > max_chars:
+            chunks.append(current)
+            current = piece
+        else:
+            current = current + piece if current else piece
+    if current:
+        chunks.append(current)
+    return chunks or [normalized]
+
+
+def concatenate_wav_files(chunk_paths: list[Path], output_path: Path) -> None:
+    if not chunk_paths:
+        raise ValueError("no audio chunks to concatenate")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    params = None
+    frames: list[bytes] = []
+    for chunk_path in chunk_paths:
+        with wave.open(str(chunk_path), "rb") as handle:
+            current_params = handle.getparams()
+            if params is None:
+                params = current_params
+            elif current_params[:3] != params[:3]:
+                raise ValueError("audio chunk wav parameters do not match")
+            frames.append(handle.readframes(handle.getnframes()))
+    if params is None:
+        raise ValueError("no wav params available")
+    with wave.open(str(output_path), "wb") as output:
+        output.setparams(params)
+        for frame_bytes in frames:
+            output.writeframes(frame_bytes)
+
+
+def run_tts_step(
+    config: dict[str, str],
+    paths: dict[str, Path],
+    job_dir: Path,
+    *,
+    step_name: str = "tts",
+) -> dict[str, Any]:
+    try:
+        if config["tts_worker_url"]:
+            result = call_avatar_worker(
+                config["tts_worker_url"],
+                "/tts",
+                {
+                    "text_path": str(paths["text_path"]),
+                    "audio_path": str(paths["audio_path"]),
+                    "job_dir": str(job_dir),
+                },
+            )
+            result["mode"] = "worker"
+        else:
+            tts_command = format_avatar_command(config["tts_command"], paths)
+            result = run_avatar_command(tts_command, job_dir)
+            result["mode"] = "command"
+    except Exception as exc:
+        if not config["tts_command"]:
+            raise
+        tts_command = format_avatar_command(config["tts_command"], paths)
+        result = run_avatar_command(tts_command, job_dir)
+        result["mode"] = "command_fallback"
+        result["worker_error"] = str(exc)
+    result["name"] = step_name
+    return result
+
+
+def generate_avatar_audio_chunks(
+    job: dict[str, Any],
+    job_dir: Path,
+    config: dict[str, str],
+    source_image: Path,
+    draft_text: str,
+    final_audio_path: Path,
+    render_output_path: Path,
+) -> bool:
+    chunks = split_avatar_text_chunks(draft_text)
+    chunk_dir = job_dir / "audio_chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    job["audio_chunks"] = [
+        {
+            "index": index,
+            "text": chunk,
+            "status": "pending",
+            "file": f"/api/avatar/jobs/{job['id']}/files/audio_chunks/chunk_{index:02d}.wav",
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+    write_avatar_job(job_dir, job)
+
+    generated_paths: list[Path] = []
+    for index, chunk in enumerate(chunks):
+        chunk_text_path = chunk_dir / f"chunk_{index:02d}.txt"
+        chunk_audio_path = chunk_dir / f"chunk_{index:02d}.wav"
+        chunk_text_path.write_text(chunk, encoding="utf-8")
+        paths = {
+            "image_path": source_image,
+            "text_path": chunk_text_path,
+            "audio_path": chunk_audio_path,
+            "output_path": render_output_path,
+            "job_dir": job_dir,
+        }
+        result = run_tts_step(config, paths, job_dir, step_name=f"tts_chunk_{index}")
+        job["steps"].append(result)
+        if result["returncode"] != 0 or not chunk_audio_path.exists():
+            job["audio_chunks"][index]["status"] = "failed"
+            job["status"] = "tts_failed"
+            job["message"] = f"TTS chunk {index} failed."
+            write_avatar_job(job_dir, job)
+            return False
+        generated_paths.append(chunk_audio_path)
+        job["audio_chunks"][index]["status"] = "ready"
+        job["audio_chunks"][index]["duration_seconds"] = result.get("duration_seconds")
+        job["files"]["audio_chunks"] = [
+            item["file"] for item in job["audio_chunks"] if item.get("status") == "ready"
+        ]
+        if index == 0:
+            job["files"]["first_audio_chunk"] = job["audio_chunks"][index]["file"]
+            job["status"] = "audio_streaming"
+            job["message"] = "First audio chunk is ready."
+        write_avatar_job(job_dir, job)
+
+    concatenate_wav_files(generated_paths, final_audio_path)
+    job["files"]["audio"] = f"/api/avatar/jobs/{job['id']}/files/reply.wav"
+    job["status"] = "audio_ready"
+    job["message"] = "Audio chunks are ready."
+    write_avatar_job(job_dir, job)
+    return True
+
+
 def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     draft_text = str(payload.get("draft_text") or "").strip()
     draft_result: dict[str, Any] | None = None
@@ -728,8 +1127,10 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     text_path = job_dir / "reply.txt"
     audio_path = job_dir / "reply.wav"
     output_path = job_dir / "avatar.mp4"
-    render_output_path = job_dir / ("avatar_base.mp4" if config["lipsync_command"] else "avatar.mp4")
+    has_lipsync = bool(config["lipsync_command"] or config["lipsync_worker_url"])
+    render_output_path = job_dir / ("avatar_base.mp4" if has_lipsync else "avatar.mp4")
     source_image = Path(config["source_image_path"]) if config["source_image_path"] else None
+    base_video = Path(config["base_video_path"]) if config["base_video_path"] else None
     job = {
         "id": job_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -746,9 +1147,13 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         "steps": [],
         "config": {
             "source_image_path": str(source_image) if source_image else "",
-            "tts_configured": bool(config["tts_command"]),
+            "base_video_path": str(base_video) if base_video else "",
+            "base_video_configured": bool(base_video and base_video.exists()),
+            "tts_configured": bool(config["tts_command"] or config["tts_worker_url"]),
+            "tts_worker_url": config["tts_worker_url"],
             "renderer_configured": bool(config["liveportrait_command"]),
-            "lipsync_configured": bool(config["lipsync_command"]),
+            "lipsync_configured": has_lipsync,
+            "lipsync_worker_url": config["lipsync_worker_url"],
         },
     }
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -761,9 +1166,9 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         write_avatar_job(job_dir, job)
         return job
 
-    if not config["tts_command"]:
+    if not (config["tts_command"] or config["tts_worker_url"]):
         job["status"] = "needs_tts"
-        job["message"] = "Set DIGITAL_TWIN_TTS_COMMAND to create reply.wav from reply.txt."
+        job["message"] = "Set DIGITAL_TWIN_TTS_WORKER_URL or DIGITAL_TWIN_TTS_COMMAND to create reply.wav from reply.txt."
         write_avatar_job(job_dir, job)
         return job
 
@@ -774,14 +1179,37 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         "output_path": render_output_path,
         "job_dir": job_dir,
     }
-    tts_command = format_avatar_command(config["tts_command"], paths)
     try:
-        tts_result = run_avatar_command(tts_command, job_dir)
+        if config["tts_worker_url"]:
+            tts_result = call_avatar_worker(
+                config["tts_worker_url"],
+                "/tts",
+                {
+                    "text_path": str(text_path),
+                    "audio_path": str(audio_path),
+                    "job_dir": str(job_dir),
+                },
+            )
+            tts_result["mode"] = "worker"
+        else:
+            tts_command = format_avatar_command(config["tts_command"], paths)
+            tts_result = run_avatar_command(tts_command, job_dir)
+            tts_result["mode"] = "command"
     except subprocess.TimeoutExpired:
         job["status"] = "tts_timeout"
         job["message"] = "TTS command timed out."
         write_avatar_job(job_dir, job)
         return job
+    except Exception as exc:
+        if not config["tts_command"]:
+            job["status"] = "tts_failed"
+            job["message"] = f"TTS worker failed: {exc}"
+            write_avatar_job(job_dir, job)
+            return job
+        tts_command = format_avatar_command(config["tts_command"], paths)
+        tts_result = run_avatar_command(tts_command, job_dir)
+        tts_result["mode"] = "command_fallback"
+        tts_result["worker_error"] = str(exc)
     job["steps"].append({"name": "tts", **tts_result})
     if tts_result["returncode"] != 0 or not audio_path.exists():
         job["status"] = "tts_failed"
@@ -791,30 +1219,43 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     job["files"]["audio"] = f"/api/avatar/jobs/{job_id}/files/reply.wav"
     write_avatar_job(job_dir, job)
 
-    if not config["liveportrait_command"]:
-        job["status"] = "needs_liveportrait"
-        job["message"] = "Set LIVEPORTRAIT_RENDER_COMMAND to create avatar.mp4 from the portrait and audio."
-        write_avatar_job(job_dir, job)
-        return job
+    if base_video and base_video.exists():
+        render_started = time.time()
+        shutil.copy2(base_video, render_output_path)
+        job["steps"].append(
+            {
+                "name": "liveportrait",
+                "mode": "cached_base_video",
+                "source": str(base_video),
+                "returncode": 0,
+                "duration_seconds": round(time.time() - render_started, 2),
+            }
+        )
+    else:
+        if not config["liveportrait_command"]:
+            job["status"] = "needs_liveportrait"
+            job["message"] = "Set DIGITAL_TWIN_AVATAR_BASE_VIDEO or LIVEPORTRAIT_RENDER_COMMAND to create avatar.mp4 from the portrait and audio."
+            write_avatar_job(job_dir, job)
+            return job
 
-    render_command = format_avatar_command(config["liveportrait_command"], paths)
-    try:
-        render_result = run_avatar_command(render_command, job_dir)
-    except subprocess.TimeoutExpired:
-        job["status"] = "render_timeout"
-        job["message"] = "LivePortrait command timed out."
-        write_avatar_job(job_dir, job)
-        return job
-    job["steps"].append({"name": "liveportrait", **render_result})
-    if render_result["returncode"] != 0 or not render_output_path.exists():
-        job["status"] = "render_failed"
-        job["message"] = "LivePortrait command failed or did not create avatar.mp4."
-        write_avatar_job(job_dir, job)
-        return job
+        render_command = format_avatar_command(config["liveportrait_command"], paths)
+        try:
+            render_result = run_avatar_command(render_command, job_dir)
+        except subprocess.TimeoutExpired:
+            job["status"] = "render_timeout"
+            job["message"] = "LivePortrait command timed out."
+            write_avatar_job(job_dir, job)
+            return job
+        job["steps"].append({"name": "liveportrait", "mode": "command", **render_result})
+        if render_result["returncode"] != 0 or not render_output_path.exists():
+            job["status"] = "render_failed"
+            job["message"] = "LivePortrait command failed or did not create avatar.mp4."
+            write_avatar_job(job_dir, job)
+            return job
     if render_output_path != output_path:
         job["files"]["base_video"] = f"/api/avatar/jobs/{job_id}/files/{render_output_path.name}"
 
-    if config["lipsync_command"]:
+    if has_lipsync:
         lipsync_paths = {
             "video_path": render_output_path,
             "image_path": source_image,
@@ -823,14 +1264,34 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             "output_path": output_path,
             "job_dir": job_dir,
         }
-        lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
         try:
-            lipsync_result = run_avatar_command(lipsync_command, job_dir)
+            if config["lipsync_worker_url"]:
+                lipsync_result = call_lipsync_worker(
+                    config,
+                    render_output_path,
+                    audio_path,
+                    output_path,
+                    job_dir,
+                )
+            else:
+                lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
+                lipsync_result = run_avatar_command(lipsync_command, job_dir)
+                lipsync_result["mode"] = "command"
         except subprocess.TimeoutExpired:
             job["status"] = "lipsync_timeout"
             job["message"] = "Lip-sync command timed out."
             write_avatar_job(job_dir, job)
             return job
+        except Exception as exc:
+            if not config["lipsync_command"]:
+                job["status"] = "lipsync_failed"
+                job["message"] = f"Lip-sync worker failed: {exc}"
+                write_avatar_job(job_dir, job)
+                return job
+            lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
+            lipsync_result = run_avatar_command(lipsync_command, job_dir)
+            lipsync_result["mode"] = "command_fallback"
+            lipsync_result["worker_error"] = str(exc)
         job["steps"].append({"name": "lipsync", **lipsync_result})
         if lipsync_result["returncode"] != 0 or not output_path.exists():
             job["status"] = "lipsync_failed"
@@ -842,6 +1303,181 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
     write_avatar_job(job_dir, job)
     return job
+
+
+def start_avatar_reply_job(payload: dict[str, Any]) -> dict[str, Any]:
+    config = avatar_env_config()
+    job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    job_dir = AVATAR_LAYER_DIR / job_id
+    job = {
+        "id": job_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": "liveportrait_local",
+        "phase": "stage_1_streaming_text_to_avatar",
+        "status": "queued",
+        "person_query": str(payload.get("query") or "").strip(),
+        "scenario": str(payload.get("scenario") or "").strip(),
+        "draft_text": str(payload.get("draft_text") or "").strip(),
+        "draft_result": None,
+        "files": {},
+        "audio_chunks": [],
+        "steps": [],
+        "config": {
+            "source_image_path": config["source_image_path"],
+            "base_video_path": config["base_video_path"],
+            "base_video_configured": bool(config["base_video_path"] and Path(config["base_video_path"]).exists()),
+            "tts_configured": bool(config["tts_command"] or config["tts_worker_url"]),
+            "tts_worker_url": config["tts_worker_url"],
+            "renderer_configured": bool(config["liveportrait_command"]),
+            "lipsync_configured": bool(config["lipsync_command"] or config["lipsync_worker_url"]),
+            "lipsync_worker_url": config["lipsync_worker_url"],
+            "streaming": True,
+        },
+        "message": "Avatar job queued.",
+    }
+    job_dir.mkdir(parents=True, exist_ok=True)
+    write_avatar_job(job_dir, job)
+    avatar_job_executor.submit(run_avatar_reply_job, payload, job_dir, job)
+    return job
+
+
+def run_avatar_reply_job(payload: dict[str, Any], job_dir: Path, job: dict[str, Any]) -> None:
+    try:
+        config = avatar_env_config()
+        source_image = Path(config["source_image_path"]) if config["source_image_path"] else None
+        base_video = Path(config["base_video_path"]) if config["base_video_path"] else None
+        text_path = job_dir / "reply.txt"
+        audio_path = job_dir / "reply.wav"
+        output_path = job_dir / "avatar.mp4"
+        has_lipsync = bool(config["lipsync_command"] or config["lipsync_worker_url"])
+        render_output_path = job_dir / ("avatar_base.mp4" if has_lipsync else "avatar.mp4")
+
+        job["status"] = "drafting"
+        job["message"] = "Generating reply text."
+        write_avatar_job(job_dir, job)
+
+        draft_text = str(payload.get("draft_text") or "").strip()
+        draft_result: dict[str, Any] | None = None
+        if not draft_text:
+            draft_result = generate_draft(payload)
+            draft_text = str(draft_result.get("draft_text") or "").strip()
+        if not draft_text:
+            raise ValueError("draft_text is required or draft generation must produce text")
+        job["draft_text"] = draft_text
+        job["draft_result"] = draft_result
+        job["files"]["text"] = f"/api/avatar/jobs/{job['id']}/files/reply.txt"
+        text_path.write_text(draft_text, encoding="utf-8")
+        write_avatar_job(job_dir, job)
+
+        if not source_image or not source_image.exists():
+            job["status"] = "needs_source_image"
+            job["message"] = "Set DIGITAL_TWIN_AVATAR_IMAGE to a local portrait image before rendering."
+            write_avatar_job(job_dir, job)
+            return
+        if not (config["tts_command"] or config["tts_worker_url"]):
+            job["status"] = "needs_tts"
+            job["message"] = "Set DIGITAL_TWIN_TTS_WORKER_URL or DIGITAL_TWIN_TTS_COMMAND."
+            write_avatar_job(job_dir, job)
+            return
+
+        job["status"] = "tts_streaming"
+        job["message"] = "Generating audio chunks."
+        write_avatar_job(job_dir, job)
+        if not generate_avatar_audio_chunks(
+            job,
+            job_dir,
+            config,
+            source_image,
+            draft_text,
+            audio_path,
+            render_output_path,
+        ):
+            return
+
+        if base_video and base_video.exists():
+            render_started = time.time()
+            shutil.copy2(base_video, render_output_path)
+            job["steps"].append(
+                {
+                    "name": "liveportrait",
+                    "mode": "cached_base_video",
+                    "source": str(base_video),
+                    "returncode": 0,
+                    "duration_seconds": round(time.time() - render_started, 2),
+                }
+            )
+        else:
+            if not config["liveportrait_command"]:
+                job["status"] = "needs_liveportrait"
+                job["message"] = "Set DIGITAL_TWIN_AVATAR_BASE_VIDEO or LIVEPORTRAIT_RENDER_COMMAND."
+                write_avatar_job(job_dir, job)
+                return
+            paths = {
+                "image_path": source_image,
+                "text_path": text_path,
+                "audio_path": audio_path,
+                "output_path": render_output_path,
+                "job_dir": job_dir,
+            }
+            render_command = format_avatar_command(config["liveportrait_command"], paths)
+            render_result = run_avatar_command(render_command, job_dir)
+            job["steps"].append({"name": "liveportrait", "mode": "command", **render_result})
+            if render_result["returncode"] != 0 or not render_output_path.exists():
+                job["status"] = "render_failed"
+                job["message"] = "LivePortrait command failed or did not create avatar.mp4."
+                write_avatar_job(job_dir, job)
+                return
+        if render_output_path != output_path:
+            job["files"]["base_video"] = f"/api/avatar/jobs/{job['id']}/files/{render_output_path.name}"
+        write_avatar_job(job_dir, job)
+
+        if has_lipsync:
+            job["status"] = "lipsyncing"
+            job["message"] = "Generating lip-synced video."
+            write_avatar_job(job_dir, job)
+            lipsync_paths = {
+                "video_path": render_output_path,
+                "image_path": source_image,
+                "text_path": text_path,
+                "audio_path": audio_path,
+                "output_path": output_path,
+                "job_dir": job_dir,
+            }
+            try:
+                if config["lipsync_worker_url"]:
+                    lipsync_result = call_lipsync_worker(
+                        config,
+                        render_output_path,
+                        audio_path,
+                        output_path,
+                        job_dir,
+                    )
+                else:
+                    lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
+                    lipsync_result = run_avatar_command(lipsync_command, job_dir)
+                    lipsync_result["mode"] = "command"
+            except Exception as exc:
+                if not config["lipsync_command"]:
+                    raise
+                lipsync_command = format_avatar_command(config["lipsync_command"], lipsync_paths)
+                lipsync_result = run_avatar_command(lipsync_command, job_dir)
+                lipsync_result["mode"] = "command_fallback"
+                lipsync_result["worker_error"] = str(exc)
+            job["steps"].append({"name": "lipsync", **lipsync_result})
+            if lipsync_result["returncode"] != 0 or not output_path.exists():
+                job["status"] = "lipsync_failed"
+                job["message"] = "Lip-sync command failed or did not create avatar.mp4."
+                write_avatar_job(job_dir, job)
+                return
+
+        job["status"] = "completed"
+        job["message"] = "Avatar video rendered."
+        job["files"]["video"] = f"/api/avatar/jobs/{job['id']}/files/avatar.mp4"
+        write_avatar_job(job_dir, job)
+    except Exception as exc:
+        job["status"] = "render_failed"
+        job["message"] = str(exc)
+        write_avatar_job(job_dir, job)
 
 
 def parse_json_object(value: str) -> dict[str, Any] | None:
@@ -2720,6 +3356,50 @@ def is_recent_news_item(item: dict[str, str], max_age_days: int = 3) -> bool:
     return published >= cutoff
 
 
+def chinese_char_count(value: str) -> int:
+    return len(re.findall(r"[\u4e00-\u9fff]", value or ""))
+
+
+def latin_word_count(value: str) -> int:
+    return len(re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", value or ""))
+
+
+def is_english_dominant_news_item(item: dict[str, str]) -> bool:
+    text = f"{item.get('title', '')} {item.get('summary', '')}"
+    return latin_word_count(text) >= 8 and chinese_char_count(text) < 12
+
+
+def priority_interest_matches(item: dict[str, str]) -> list[dict[str, Any]]:
+    text = normalize_selfcore_text(
+        f"{item.get('title', '')} {item.get('summary', '')} {item.get('detail', '')[:1800]}"
+    )
+    matches: list[dict[str, Any]] = []
+    for rule in NEWS_PRIORITY_INTEREST_RULES:
+        topic_hit = any(normalize_selfcore_text(str(keyword)) in text for keyword in rule.get("topic_keywords", []))
+        market_hit = any(normalize_selfcore_text(str(keyword)) in text for keyword in rule.get("market_keywords", []))
+        if topic_hit and market_hit:
+            matches.append(rule)
+    return matches
+
+
+def priority_interest_score(item: dict[str, str]) -> int:
+    return sum(int(rule.get("boost") or 0) for rule in priority_interest_matches(item))
+
+
+def annotate_news_priority_interest(item: dict[str, str]) -> None:
+    matches = priority_interest_matches(item)
+    if not matches:
+        item["user_interest_priority_score"] = "0"
+        item["priority_interest_labels"] = ""
+        return
+    item["user_interest_priority_score"] = str(sum(int(rule.get("boost") or 0) for rule in matches))
+    item["priority_interest_labels"] = "；".join(str(rule.get("label") or rule.get("id")) for rule in matches)
+    primary_category = str(matches[0].get("category") or "")
+    if primary_category:
+        item["interest_category"] = primary_category
+        item["interest_category_label"] = category_label(primary_category)
+
+
 def discussion_score(item: dict[str, str]) -> int:
     text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('tags', '')} {item.get('detail', '')[:1200]}"
     score = 0
@@ -2727,6 +3407,7 @@ def discussion_score(item: dict[str, str]) -> int:
         if keyword.lower() in text.lower():
             score += weight
     score += conflict_score(item) * 2
+    score += priority_interest_score(item)
     if item.get("source"):
         score += 1
     if item.get("published_at"):
@@ -2802,6 +3483,7 @@ def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int,
     selected_ids: set[str] = set()
     category_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
+    priority_label_counts: dict[str, int] = {}
     cluster_seen: set[str] = set()
 
     def score(item: dict[str, str]) -> int:
@@ -2811,6 +3493,7 @@ def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int,
             + int(item.get("discussion_score") or 0)
             + int(item.get("conflict_score") or 0) * 3
             + int(item.get("interest_category_score") or 0)
+            + int(item.get("user_interest_priority_score") or 0)
         )
 
     ranked = sorted(candidates, key=score, reverse=True)
@@ -2820,9 +3503,14 @@ def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int,
         cluster = str(item.get("_event_cluster") or "")
         if item.get("news_id") in selected_ids:
             continue
+        if is_english_dominant_news_item(item):
+            continue
         if strict_quota and category_counts.get(category, 0) >= quota_by_category.get(category, 1):
             continue
         if source and source_counts.get(source, 0) >= 2:
+            continue
+        priority_label = str(item.get("priority_interest_labels") or "").split("；")[0].strip()
+        if priority_label and priority_label_counts.get(priority_label, 0) >= 1:
             continue
         if cluster and cluster in cluster_seen:
             continue
@@ -2830,6 +3518,8 @@ def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int,
         selected_ids.add(str(item.get("news_id")))
         category_counts[category] = category_counts.get(category, 0) + 1
         source_counts[source] = source_counts.get(source, 0) + 1
+        if priority_label:
+            priority_label_counts[priority_label] = priority_label_counts.get(priority_label, 0) + 1
         if cluster:
             cluster_seen.add(cluster)
         if len(selected) >= limit:
@@ -2839,15 +3529,22 @@ def diversity_rank_news_candidates(candidates: list[dict[str, str]], limit: int,
         for item in ranked:
             if item.get("news_id") in selected_ids:
                 continue
+            if is_english_dominant_news_item(item):
+                continue
             source = str(item.get("source") or "")
             cluster = str(item.get("_event_cluster") or "")
             if source and source_counts.get(source, 0) >= 2:
+                continue
+            priority_label = str(item.get("priority_interest_labels") or "").split("；")[0].strip()
+            if priority_label and priority_label_counts.get(priority_label, 0) >= 1:
                 continue
             if cluster and cluster in cluster_seen:
                 continue
             selected.append(item)
             selected_ids.add(str(item.get("news_id")))
             source_counts[source] = source_counts.get(source, 0) + 1
+            if priority_label:
+                priority_label_counts[priority_label] = priority_label_counts.get(priority_label, 0) + 1
             if cluster:
                 cluster_seen.add(cluster)
             if len(selected) >= limit:
@@ -2932,6 +3629,9 @@ def parse_rss_items_fallback(feed: dict[str, str], body: bytes) -> list[dict[str
                 "source_url": "",
                 "published_at": published_at,
                 "tags": feed["topic"],
+                "feed_slug": str(feed.get("slug") or ""),
+                "interest_radar": "1" if feed.get("interest_radar") else "",
+                "prefer_chinese": "1" if feed.get("prefer_chinese") else "",
             }
         )
     return items
@@ -2974,6 +3674,9 @@ def fetch_rss_feed(feed: dict[str, str], timeout: float = 6.0) -> list[dict[str,
                 "source_url": source_url,
                 "published_at": published_at,
                 "tags": feed["topic"],
+                "feed_slug": str(feed.get("slug") or ""),
+                "interest_radar": "1" if feed.get("interest_radar") else "",
+                "prefer_chinese": "1" if feed.get("prefer_chinese") else "",
             }
         )
     return items
@@ -3130,6 +3833,7 @@ def build_news_screening_prompt(candidates: list[dict[str, str]], limit: int) ->
                     f"published_at: {item.get('published_at', '')}",
                     f"tags: {item.get('tags', '')}",
                     f"interest_category: {item.get('interest_category_label', '')} ({item.get('interest_category', '')})",
+                    f"user_priority: {item.get('priority_interest_labels', '')} score={item.get('user_interest_priority_score', '')}",
                     f"code_discussion_score: {item.get('discussion_score', '')}",
                     f"code_conflict_score: {item.get('conflict_score', '')}",
                     f"summary: {news_screening_excerpt(item.get('summary', ''), 420)}",
@@ -3148,6 +3852,8 @@ def build_news_screening_prompt(candidates: list[dict[str, str]], limit: int) ->
 - 必须是一条相对单一的新闻事件，不要合集、列表、早晚报、多个无关事实拼盘。
 - 优先选择会暴露价值判断差异的新闻：权利 vs 秩序、创新 vs 风险、平台/政府/市场边界、效率 vs 公平、长期主义 vs 短期收益、AI 进步 vs 安全/隐私、责任归因、国际关系立场等。
 - 每日 10 条要尽量覆盖用户画像里的不同兴趣类别，不要都集中在 AI、国际政治或宏观商业热点。
+- user_priority 表示用户画像里的强兴趣交叉点；同等质量下优先，但不要为了命中标签硬选低质量、英文语境突兀或重复角度的新闻。
+- 默认保持中文信息语境一致；英文源或英文标题只有在没有中文等价报道、且对齐价值明显更高时才可选择。
 - 同一来源最多选 2 条；同一事件链最多选 1 条；如果两条新闻只能校准同一种判断，保留更具体、更有冲突的一条。
 - 至少保留 1 条“平时不一定主动看、但可能暴露盲区或反常识判断”的野卡新闻。
 - 降低纯客观通知、产品发布、活动信息、单纯涨跌、宣传稿、弱争议事实陈述的排序。
@@ -3277,9 +3983,13 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
     discarded_roundup = 0
     discarded_non_discussion = 0
     discarded_stale = 0
+    discarded_language_mismatch = 0
     for item in fetched:
         if not is_recent_news_item(item):
             discarded_stale += 1
+            continue
+        if item.get("prefer_chinese") and is_english_dominant_news_item(item):
+            discarded_language_mismatch += 1
             continue
         if is_roundup_news_item(item):
             discarded_roundup += 1
@@ -3299,7 +4009,7 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
     discarded_low_discussion = 0
     category_counts: dict[str, int] = {}
     per_category_limit = 10 if use_model_screening else 3
-    pool_limit = max(limit, NEWS_MODEL_CANDIDATE_POOL_SIZE if use_model_screening else limit)
+    pool_limit = max(limit, NEWS_MODEL_CANDIDATE_POOL_SIZE if use_model_screening else NEWS_CODE_CANDIDATE_POOL_SIZE)
     for item in deduped:
         if not hydrate_news_item_detail(item):
             discarded_no_detail += 1
@@ -3307,6 +4017,8 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
         item["conflict_score"] = str(conflict_score(item))
         item["discussion_score"] = str(discussion_score(item))
         annotate_news_interest_category(item)
+        annotate_news_priority_interest(item)
+        item["discussion_score"] = str(discussion_score(item))
         category = item.get("interest_category", "wildcard")
         if category_counts.get(category, 0) >= per_category_limit:
             continue
@@ -3328,6 +4040,8 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
             item["conflict_score"] = str(conflict_score(item))
             item["discussion_score"] = str(discussion_score(item))
             annotate_news_interest_category(item)
+            annotate_news_priority_interest(item)
+            item["discussion_score"] = str(discussion_score(item))
             if int(item["conflict_score"]) < NEWS_MIN_CONFLICT_SCORE:
                 discarded_low_discussion += 1
                 continue
@@ -3355,6 +4069,7 @@ def fetch_discussable_news(payload: dict[str, Any]) -> dict[str, Any]:
         "discarded_roundup": discarded_roundup,
         "discarded_non_discussion": discarded_non_discussion,
         "discarded_stale": discarded_stale,
+        "discarded_language_mismatch": discarded_language_mismatch,
         "discarded_low_discussion": discarded_low_discussion,
         "errors": errors[:5],
         "model_screening": model_meta.get("model_screening", False),
@@ -4902,6 +5617,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception:
                 self.send_error(404)
             return
+        if path.startswith("/api/avatar/jobs/"):
+            try:
+                job_id = path.rsplit("/", 1)[-1]
+                self.send_json({"ok": True, "result": get_avatar_job(job_id)})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=404)
+            return
         if path.startswith("/api/multimodal/asr-jobs/"):
             job_id = path.rsplit("/", 1)[-1]
             try:
@@ -4959,7 +5681,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/selfcore-candidates/inject":
                 result = inject_selfcore_proposals(payload)
             elif self.path == "/api/avatar/reply":
-                result = create_avatar_reply(payload)
+                result = (
+                    start_avatar_reply_job(payload)
+                    if bool(payload.get("streaming") or payload.get("async"))
+                    else create_avatar_reply(payload)
+                )
             else:
                 result = generate_multimodal_intake(payload)
         except Exception as exc:  # Keep local UI errors readable.
