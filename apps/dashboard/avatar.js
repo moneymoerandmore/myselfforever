@@ -20,6 +20,7 @@ const jobSummary = document.querySelector("#jobSummary");
 const jobBadge = document.querySelector("#jobBadge");
 const replyText = document.querySelector("#replyText");
 const avatarLiveStream = document.querySelector("#avatarLiveStream");
+const avatarSyncCanvas = document.querySelector("#avatarSyncCanvas");
 const avatarAudio = document.querySelector("#avatarAudio");
 const avatarVideo = document.querySelector("#avatarVideo");
 const jobsList = document.querySelector("#jobsList");
@@ -30,6 +31,10 @@ const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 let people = [];
 let activeJobId = null;
 let activeJobTimer = null;
+let currentStreamWorkerUrl = "";
+let currentSyncSessionId = "";
+let syncPlaybackTimer = null;
+let syncObjectUrl = "";
 
 function setHealth(ok, text) {
   healthStatus.textContent = text;
@@ -198,6 +203,7 @@ function renderProviderStatus(status) {
   const sourceReady = Boolean(status.source_image?.configured && status.source_image?.exists);
   const baseReady = Boolean(status.base_video?.configured && status.base_video?.exists);
   const streamReady = Boolean(status.stream?.configured && status.stream?.worker?.ok && status.stream?.idle_stream_url);
+  currentStreamWorkerUrl = status.stream?.worker_url || "";
   const ttsReady = Boolean(status.tts?.configured);
   const rendererReady = Boolean(baseReady || status.renderer?.configured);
   const lipsyncReady = Boolean(status.lipsync?.configured);
@@ -210,7 +216,7 @@ function renderProviderStatus(status) {
   if (streamReady) {
     const streamUrl = `${status.stream.idle_stream_url}?t=${Date.now()}`;
     if (avatarLiveStream.src !== streamUrl) avatarLiveStream.src = streamUrl;
-    avatarLiveStream.hidden = false;
+    avatarLiveStream.hidden = Boolean(currentSyncSessionId);
   } else {
     avatarLiveStream.hidden = true;
     avatarLiveStream.removeAttribute("src");
@@ -223,6 +229,96 @@ function renderProviderStatus(status) {
     providerItem("TTS", ttsReady, status.tts?.worker_url ? workerText(status.tts.worker) : "command mode"),
     providerItem("LipSync", lipsyncReady, status.lipsync?.worker_url ? workerText(status.lipsync.worker) : "command mode"),
   );
+}
+
+function stopSynchronizedPlayback() {
+  if (syncPlaybackTimer) clearTimeout(syncPlaybackTimer);
+  syncPlaybackTimer = null;
+  currentSyncSessionId = "";
+  if (syncObjectUrl) URL.revokeObjectURL(syncObjectUrl);
+  syncObjectUrl = "";
+  avatarSyncCanvas.hidden = true;
+  avatarLiveStream.hidden = !avatarLiveStream.src;
+}
+
+async function syncStatus(sessionId) {
+  if (!currentStreamWorkerUrl || !sessionId) return null;
+  const response = await fetch(`${currentStreamWorkerUrl}/sync-status?session_id=${encodeURIComponent(sessionId)}`);
+  if (!response.ok) return null;
+  return response.json();
+}
+
+async function drawSyncFrame(sessionId, timeMs) {
+  const response = await fetch(
+    `${currentStreamWorkerUrl}/sync-frame?session_id=${encodeURIComponent(sessionId)}&t=${Math.max(0, Math.floor(timeMs))}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) return false;
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+  const canvas = avatarSyncCanvas;
+  const context = canvas.getContext("2d");
+  if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+  }
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return true;
+}
+
+async function waitForSyncBuffer(sessionId, minFrames = 8, timeoutMs = 12000) {
+  const started = performance.now();
+  while (performance.now() - started < timeoutMs) {
+    const status = await syncStatus(sessionId);
+    if (status?.ok && (status.frame_count >= minFrames || status.complete)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+  return null;
+}
+
+async function startSynchronizedPlayback(job) {
+  const sessionId = job.id;
+  if (!currentStreamWorkerUrl || !job.files?.audio || currentSyncSessionId === sessionId) return;
+  currentSyncSessionId = sessionId;
+  if (syncPlaybackTimer) clearTimeout(syncPlaybackTimer);
+  avatarSyncCanvas.hidden = false;
+  avatarLiveStream.hidden = true;
+  avatarAudio.hidden = false;
+  avatarAudio.src = `${job.files.audio}?t=${Date.now()}`;
+
+  const buffered = await waitForSyncBuffer(sessionId);
+  if (currentSyncSessionId !== sessionId) return;
+  if (!buffered?.ok) {
+    setHealth(false, "sync frames are not ready yet");
+    return;
+  }
+
+  const tick = async () => {
+    if (currentSyncSessionId !== sessionId) return;
+    const ok = await drawSyncFrame(sessionId, avatarAudio.currentTime * 1000);
+    if (!ok && !avatarAudio.paused) avatarAudio.pause();
+    if (ok && avatarAudio.paused && !avatarAudio.ended) {
+      try {
+        await avatarAudio.play();
+      } catch {
+        setHealth(false, "Audio is ready. Press play once to allow synchronized playback.");
+      }
+    }
+    if (avatarAudio.ended) {
+      syncPlaybackTimer = null;
+      return;
+    }
+    syncPlaybackTimer = setTimeout(tick, 40);
+  };
+
+  try {
+    await drawSyncFrame(sessionId, 0);
+    await avatarAudio.play();
+  } catch {
+    setHealth(false, "Audio is ready. Press play once to allow synchronized playback.");
+  }
+  tick();
 }
 
 async function loadProviderStatus() {
@@ -309,6 +405,9 @@ function renderJob(job) {
     avatarAudio.hidden = false;
     avatarAudio.src = `${job.files.audio}?t=${Date.now()}`;
   }
+  if (job.files?.audio && (job.status === "lipsyncing" || job.status === "completed")) {
+    startSynchronizedPlayback(job).catch((error) => setHealth(false, error.message));
+  }
 }
 
 async function pollAvatarJob(jobId) {
@@ -342,6 +441,7 @@ function resetPlayback() {
   if (activeJobTimer) clearInterval(activeJobTimer);
   activeJobTimer = null;
   activeJobId = null;
+  stopSynchronizedPlayback();
   avatarAudio.pause();
   avatarAudio.hidden = true;
   avatarAudio.removeAttribute("src");
@@ -389,6 +489,7 @@ async function renderAvatarReply() {
         mode: person.group === "direct" && person.permission?.can_generate_draft !== false ? modeInput.value : "observe",
         relationship_graph_surface: true,
         multimodal_output_surface: "avatar",
+        latency_profile: "fast_avatar",
         streaming: true,
       }),
     });

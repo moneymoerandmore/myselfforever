@@ -571,6 +571,7 @@ def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
     response_policy = str(payload.get("response_policy") or "balanced").strip()
     factuality_guard = bool(payload.get("factuality_guard", False))
     trusted_group = bool(payload.get("trusted_group", False))
+    latency_profile = str(payload.get("latency_profile") or "").strip()
     conversation_history = normalize_conversation_history(payload.get("conversation_history"))
 
     if not query:
@@ -597,6 +598,7 @@ def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
     result["response_policy"] = response_policy
     result["factuality_guard"] = factuality_guard
     result["trusted_group"] = trusted_group
+    result["latency_profile"] = latency_profile
     person = result.get("person") or {}
     if trusted_group:
         prepare_trusted_group_context(result)
@@ -733,6 +735,9 @@ def avatar_env_config() -> dict[str, str]:
                     "lipsync_command": str(payload.get("lipsync_command") or "").strip(),
                     "lipsync_worker_url": str(payload.get("lipsync_worker_url") or "").strip(),
                     "lipsync_mode": str(payload.get("lipsync_mode") or "").strip(),
+                    "lipsync_fps": str(payload.get("lipsync_fps") or "").strip(),
+                    "lipsync_batch_size": str(payload.get("lipsync_batch_size") or "").strip(),
+                    "lipsync_skip_video": str(payload.get("lipsync_skip_video") or "").strip(),
                     "realtime_avatar_id": str(payload.get("realtime_avatar_id") or "").strip(),
                 }
         except (OSError, json.JSONDecodeError):
@@ -756,6 +761,12 @@ def avatar_env_config() -> dict[str, str]:
         or file_config.get("lipsync_worker_url", ""),
         "lipsync_mode": os.environ.get("AVATAR_LIPSYNC_MODE", "").strip()
         or file_config.get("lipsync_mode", ""),
+        "lipsync_fps": os.environ.get("AVATAR_LIPSYNC_FPS", "").strip()
+        or file_config.get("lipsync_fps", "12"),
+        "lipsync_batch_size": os.environ.get("AVATAR_LIPSYNC_BATCH_SIZE", "").strip()
+        or file_config.get("lipsync_batch_size", "8"),
+        "lipsync_skip_video": os.environ.get("AVATAR_LIPSYNC_SKIP_VIDEO", "").strip()
+        or file_config.get("lipsync_skip_video", "true"),
         "realtime_avatar_id": os.environ.get("AVATAR_REALTIME_ID", "").strip()
         or file_config.get("realtime_avatar_id", "digital_twin"),
     }
@@ -810,6 +821,9 @@ def avatar_layer_status() -> dict[str, Any]:
             "worker_url": config["lipsync_worker_url"],
             "worker": probe_avatar_worker(config["lipsync_worker_url"]),
             "mode": config["lipsync_mode"] or "normal",
+            "fps": config["lipsync_fps"],
+            "batch_size": config["lipsync_batch_size"],
+            "skip_video": config["lipsync_skip_video"],
             "realtime_avatar_id": config["realtime_avatar_id"],
             "env": "AVATAR_LIPSYNC_COMMAND / AVATAR_LIPSYNC_WORKER_URL",
         },
@@ -1013,6 +1027,15 @@ def call_lipsync_worker(
     job_dir: Path,
 ) -> dict[str, Any]:
     mode = (config.get("lipsync_mode") or "").strip().lower()
+    try:
+        fps = int(config.get("lipsync_fps") or 12)
+    except (TypeError, ValueError):
+        fps = 12
+    try:
+        batch_size = int(config.get("lipsync_batch_size") or 8)
+    except (TypeError, ValueError):
+        batch_size = 8
+    skip_video = str(config.get("lipsync_skip_video") or "").strip().lower() in {"1", "true", "yes", "on"}
     if mode == "realtime":
         result = call_avatar_worker(
             config["lipsync_worker_url"],
@@ -1023,8 +1046,11 @@ def call_lipsync_worker(
                 "audio_path": str(audio_path),
                 "output_path": str(output_path),
                 "job_dir": str(job_dir),
-                "fps": 25,
+                "fps": fps,
+                "batch_size": batch_size,
+                "skip_video": skip_video,
                 "stream_worker_url": config.get("stream_worker_url", ""),
+                "stream_session_id": job_dir.name,
             },
         )
         result["mode"] = "worker_realtime"
@@ -1389,15 +1415,21 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             lipsync_result["mode"] = "command_fallback"
             lipsync_result["worker_error"] = str(exc)
         job["steps"].append({"name": "lipsync", **lipsync_result})
-        if lipsync_result["returncode"] != 0 or not output_path.exists():
+        worker_result = lipsync_result.get("worker_result") if isinstance(lipsync_result.get("worker_result"), dict) else {}
+        skipped_video = bool(worker_result.get("skip_video"))
+        if lipsync_result["returncode"] != 0 or (not skipped_video and not output_path.exists()):
             job["status"] = "lipsync_failed"
             job["message"] = "Lip-sync command failed or did not create avatar.mp4."
             write_avatar_job(job_dir, job)
             return job
-    job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
+    if output_path.exists():
+        job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
     try:
-        job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
-        job["message"] = "Avatar video rendered and sent to live stream."
+        if output_path.exists():
+            job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
+            job["message"] = "Avatar video rendered and sent to live stream."
+        else:
+            job["message"] = "Avatar frames generated for synchronized playback."
     except Exception as exc:
         job["steps"].append(
             {
@@ -1590,16 +1622,22 @@ def run_avatar_reply_job(payload: dict[str, Any], job_dir: Path, job: dict[str, 
                 lipsync_result["mode"] = "command_fallback"
                 lipsync_result["worker_error"] = str(exc)
             job["steps"].append({"name": "lipsync", **lipsync_result})
-            if lipsync_result["returncode"] != 0 or not output_path.exists():
+            worker_result = lipsync_result.get("worker_result") if isinstance(lipsync_result.get("worker_result"), dict) else {}
+            skipped_video = bool(worker_result.get("skip_video"))
+            if lipsync_result["returncode"] != 0 or (not skipped_video and not output_path.exists()):
                 job["status"] = "lipsync_failed"
                 job["message"] = "Lip-sync command failed or did not create avatar.mp4."
                 write_avatar_job(job_dir, job)
                 return
 
-        job["files"]["video"] = f"/api/avatar/jobs/{job['id']}/files/avatar.mp4"
+        if output_path.exists():
+            job["files"]["video"] = f"/api/avatar/jobs/{job['id']}/files/avatar.mp4"
         try:
-            job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
-            job["message"] = "Avatar video rendered and sent to live stream."
+            if output_path.exists():
+                job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
+                job["message"] = "Avatar video rendered and sent to live stream."
+            else:
+                job["message"] = "Avatar frames generated for synchronized playback."
         except Exception as exc:
             job["steps"].append(
                 {
@@ -5392,6 +5430,7 @@ def build_model_prompt(
     reply_anchor_text = render_history(reply_anchor_history)
     response_policy = draft_context.get("response_policy") or "balanced"
     allow_no_reply = bool(draft_context.get("allow_no_reply", False))
+    latency_profile = str(draft_context.get("latency_profile") or "").strip()
     if response_policy == "active_group":
         participation_guidance = """当前是熟人群的积极参与模式：
 - 不要把“不说废话”理解成“不说话”。你应保持自然存在感。
@@ -5416,6 +5455,16 @@ def build_model_prompt(
 - 接话锚点只能来自最后 1-3 条消息，尤其以最后一条为准。
 - 更早的长上下文用于理解整场话题、人物立场、指代、玩笑和话题转折，不能直接作为回复对象。
 - 如果最后几条已经切换话题，必须跟随新话题；宁可轻接当前话题，也不要远距离回头接话。"""
+    latency_guidance = ""
+    if latency_profile == "fast_avatar":
+        latency_guidance = """
+数字人实时形象低延迟约束：
+- 输出最多 1 条消息。
+- 尽量 4-10 个中文字符，最多 12 个中文字符。
+- 只说第一反应，不展开解释。
+- 可以用短问句或短判断，例如“看天气”“别绕了”“我倾向这个”。
+- 不要为了完整而多说；后续可以再补。
+"""
     return f"""你是用户的数字分身草稿生成器。不要写咨询师腔、客服腔、公众号腔、AI 模板腔。
 
 任务：生成一次“像用户本人会发”的中文聊天草稿。它可以是 1-5 条连续短消息，而不是一整段长回复。
@@ -5450,6 +5499,7 @@ def build_model_prompt(
 
 本轮参与策略：
 {participation_guidance}
+{latency_guidance}
 
 SelfCore 表达摘要：
 {self_core_excerpt()}

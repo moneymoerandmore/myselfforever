@@ -140,6 +140,15 @@
   object-fit: contain;
 }
 
+.avatar-sync-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111;
+}
+
 .avatar-video {
   width: 100%;
   aspect-ratio: 16 / 9;

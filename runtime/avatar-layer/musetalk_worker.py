@@ -19,6 +19,7 @@ import time
 import types
 from typing import Any
 import urllib.request
+from urllib.parse import urlencode
 from uuid import uuid4
 
 
@@ -102,7 +103,30 @@ def run_command(command: list[str], cwd: Path) -> None:
         raise RuntimeError(f"command failed with exit code {completed.returncode}")
 
 
-def push_frame_to_stream(stream_worker_url: str, frame: Any, jpeg_quality: int = 82) -> bool:
+def call_stream_json(stream_worker_url: str, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not stream_worker_url:
+        return {"ok": False, "error": "stream worker not configured"}
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        stream_worker_url.rstrip("/") + "/" + endpoint.lstrip("/"),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=2.0) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data if isinstance(data, dict) else {"ok": False, "error": "invalid stream response"}
+
+
+def push_frame_to_stream(
+    stream_worker_url: str,
+    frame: Any,
+    *,
+    session_id: str = "",
+    frame_index: int = 0,
+    fps: int = 25,
+    jpeg_quality: int = 82,
+) -> bool:
     if not stream_worker_url:
         return False
     import cv2
@@ -114,8 +138,11 @@ def push_frame_to_stream(stream_worker_url: str, frame: Any, jpeg_quality: int =
     )
     if not encoded_ok:
         return False
+    query = ""
+    if session_id:
+        query = "?" + urlencode({"session_id": session_id, "frame_index": frame_index, "fps": fps})
     req = urllib.request.Request(
-        stream_worker_url.rstrip("/") + "/push-frame",
+        stream_worker_url.rstrip("/") + "/push-frame" + query,
         data=encoded.tobytes(),
         headers={"Content-Type": "image/jpeg"},
         method="POST",
@@ -358,6 +385,8 @@ class MuseTalkWorker:
         batch_size: int | None = None,
         fps: int = 25,
         stream_worker_url: str = "",
+        stream_session_id: str = "",
+        skip_video: bool = False,
     ) -> dict[str, Any]:
         import cv2
         import numpy as np
@@ -389,6 +418,13 @@ class MuseTalkWorker:
         stream_push_seconds = 0.0
         stream_frame_count = 0
         stream_push_failures = 0
+        stream_sync_started = False
+        if stream_worker_url and stream_session_id:
+            try:
+                call_stream_json(stream_worker_url, "/begin-sync", {"session_id": stream_session_id, "fps": fps})
+                stream_sync_started = True
+            except Exception:
+                stream_push_failures += 1
         with self.lock:
             audio_started = time.time()
             whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
@@ -442,7 +478,13 @@ class MuseTalkWorker:
                         if stream_worker_url:
                             push_started = time.time()
                             try:
-                                if push_frame_to_stream(stream_worker_url, combine_frame):
+                                if push_frame_to_stream(
+                                    stream_worker_url,
+                                    combine_frame,
+                                    session_id=stream_session_id,
+                                    frame_index=frame_index,
+                                    fps=fps,
+                                ):
                                     stream_frame_count += 1
                                 else:
                                     stream_push_failures += 1
@@ -451,53 +493,62 @@ class MuseTalkWorker:
                             stream_push_seconds += time.time() - push_started
                         frame_index += 1
             model_seconds = round(time.time() - model_started, 2)
+            if stream_worker_url and stream_session_id and stream_sync_started:
+                try:
+                    call_stream_json(stream_worker_url, "/finish-sync", {"session_id": stream_session_id})
+                except Exception:
+                    stream_push_failures += 1
 
-            encode_started = time.time()
-            run_command(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "warning",
-                    "-r",
-                    str(fps),
-                    "-f",
-                    "image2",
-                    "-i",
-                    str(frame_dir / "%08d.png"),
-                    "-vcodec",
-                    "libx264",
-                    "-vf",
-                    "format=yuv420p",
-                    "-crf",
-                    "18",
-                    str(temp_video),
-                ],
-                self.repo,
-            )
-            encode_seconds = round(time.time() - encode_started, 2)
-            mux_started = time.time()
-            run_command(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "warning",
-                    "-i",
-                    str(audio_path),
-                    "-i",
-                    str(temp_video),
-                    str(output_path),
-                ],
-                self.repo,
-            )
-            mux_seconds = round(time.time() - mux_started, 2)
+            if not skip_video:
+                encode_started = time.time()
+                run_command(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-v",
+                        "warning",
+                        "-r",
+                        str(fps),
+                        "-f",
+                        "image2",
+                        "-i",
+                        str(frame_dir / "%08d.png"),
+                        "-vcodec",
+                        "libx264",
+                        "-vf",
+                        "format=yuv420p",
+                        "-crf",
+                        "18",
+                        str(temp_video),
+                    ],
+                    self.repo,
+                )
+                encode_seconds = round(time.time() - encode_started, 2)
+                mux_started = time.time()
+                run_command(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-v",
+                        "warning",
+                        "-i",
+                        str(audio_path),
+                        "-i",
+                        str(temp_video),
+                        str(output_path),
+                    ],
+                    self.repo,
+                )
+                mux_seconds = round(time.time() - mux_started, 2)
 
         return {
             "video_path": str(output_path),
             "avatar_id": safe_avatar_id,
             "frame_count": frame_index,
             "inference_seconds": round(time.time() - started, 2),
+            "skip_video": skip_video,
+            "fps": fps,
+            "batch_size": batch_size or self.batch_size,
             "timings": {
                 "audio_feature_seconds": audio_feature_seconds,
                 "model_and_frame_seconds": model_seconds,
@@ -506,6 +557,8 @@ class MuseTalkWorker:
                 "stream_push_seconds": round(stream_push_seconds, 2),
                 "stream_frame_count": stream_frame_count,
                 "stream_push_failures": stream_push_failures,
+                "stream_session_id": stream_session_id,
+                "stream_sync_started": stream_sync_started,
             },
             "model_load_seconds": self.load_seconds,
             "realtime_avatar": avatar_pack["meta"],
@@ -765,6 +818,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     batch_size=int(payload.get("batch_size") or self.worker.batch_size),
                     fps=int(payload.get("fps") or 25),
                     stream_worker_url=str(payload.get("stream_worker_url") or "").strip(),
+                    stream_session_id=str(payload.get("stream_session_id") or "").strip(),
+                    skip_video=bool(payload.get("skip_video", False)),
                 )
             else:
                 result = self.worker.lipsync(

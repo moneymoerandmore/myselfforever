@@ -8,7 +8,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 
@@ -40,6 +40,7 @@ class StreamState:
         self.active_frame_count = 0
         self.active_frame_started_at: float | None = None
         self.active_frame_updated_at: float | None = None
+        self.sync_sessions: dict[str, dict[str, Any]] = {}
 
     def health(self) -> dict[str, Any]:
         with self.lock:
@@ -50,6 +51,16 @@ class StreamState:
             active_frame_token = self.active_frame_token
             active_frame_started_at = self.active_frame_started_at
             active_frame_updated_at = self.active_frame_updated_at
+            sync_sessions = {
+                session_id: {
+                    "fps": session["fps"],
+                    "frame_count": len(session["frames"]),
+                    "max_frame_index": max(session["frames"].keys()) if session["frames"] else -1,
+                    "complete": session["complete"],
+                    "updated_age_seconds": round(time.time() - session["updated_at"], 2),
+                }
+                for session_id, session in self.sync_sessions.items()
+            }
         return {
             "ok": self.video_path.exists(),
             "provider": "avatar_idle_stream",
@@ -69,6 +80,7 @@ class StreamState:
             "active_frame_age_seconds": round(time.time() - active_frame_updated_at, 2)
             if active_frame_updated_at
             else 0,
+            "sync_sessions": sync_sessions,
             "fps": self.fps,
             "jpeg_quality": self.jpeg_quality,
             "uptime_seconds": round(time.time() - STARTED_AT, 2),
@@ -118,6 +130,103 @@ class StreamState:
                 "active_frame_count": self.active_frame_count,
             }
 
+    def begin_sync(self, session_id: str, fps: float) -> dict[str, Any]:
+        safe_session_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in session_id)
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        with self.lock:
+            self.sync_sessions[safe_session_id] = {
+                "fps": max(1.0, fps),
+                "frames": {},
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "complete": False,
+            }
+        return {"ok": True, "session_id": safe_session_id, "fps": max(1.0, fps)}
+
+    def push_sync_frame(self, session_id: str, frame_index: int, frame: bytes, fps: float) -> dict[str, Any]:
+        if not frame:
+            raise ValueError("empty frame")
+        safe_session_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in session_id)
+        if not safe_session_id:
+            return self.push_frame(frame)
+        with self.lock:
+            session = self.sync_sessions.setdefault(
+                safe_session_id,
+                {
+                    "fps": max(1.0, fps),
+                    "frames": {},
+                    "created_at": time.time(),
+                    "updated_at": time.time(),
+                    "complete": False,
+                },
+            )
+            session["fps"] = max(1.0, fps)
+            session["frames"][max(0, frame_index)] = frame
+            session["updated_at"] = time.time()
+            return {
+                "ok": True,
+                "mode": "sync_frame",
+                "session_id": safe_session_id,
+                "frame_index": max(0, frame_index),
+                "frame_count": len(session["frames"]),
+            }
+
+    def finish_sync(self, session_id: str) -> dict[str, Any]:
+        safe_session_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in session_id)
+        with self.lock:
+            session = self.sync_sessions.get(safe_session_id)
+            if not session:
+                return {"ok": True, "session_id": safe_session_id, "complete": True, "frame_count": 0}
+            session["complete"] = True
+            session["updated_at"] = time.time()
+            return {
+                "ok": True,
+                "session_id": safe_session_id,
+                "complete": True,
+                "frame_count": len(session["frames"]),
+            }
+
+    def sync_status(self, session_id: str) -> dict[str, Any]:
+        safe_session_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in session_id)
+        with self.lock:
+            session = self.sync_sessions.get(safe_session_id)
+            if not session:
+                return {"ok": False, "error": "sync session not found", "session_id": safe_session_id}
+            frames = session["frames"]
+            return {
+                "ok": True,
+                "session_id": safe_session_id,
+                "fps": session["fps"],
+                "frame_count": len(frames),
+                "max_frame_index": max(frames.keys()) if frames else -1,
+                "complete": session["complete"],
+                "updated_age_seconds": round(time.time() - session["updated_at"], 2),
+            }
+
+    def sync_frame(self, session_id: str, time_ms: float) -> tuple[bytes | None, dict[str, Any]]:
+        safe_session_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in session_id)
+        with self.lock:
+            session = self.sync_sessions.get(safe_session_id)
+            if not session:
+                return None, {"ok": False, "error": "sync session not found", "session_id": safe_session_id}
+            fps = float(session["fps"])
+            target = max(0, int((time_ms / 1000.0) * fps))
+            frames = session["frames"]
+            if target in frames:
+                return frames[target], {"ok": True, "session_id": safe_session_id, "frame_index": target}
+            available = [index for index in frames.keys() if index <= target]
+            if available:
+                frame_index = max(available)
+                return frames[frame_index], {"ok": True, "session_id": safe_session_id, "frame_index": frame_index}
+            return None, {
+                "ok": False,
+                "error": "frame not ready",
+                "session_id": safe_session_id,
+                "target_frame_index": target,
+                "frame_count": len(frames),
+            }
+
     def frame(self) -> tuple[bytes | None, int]:
         with self.lock:
             if self.active_frame and self.active_frame_updated_at:
@@ -149,10 +258,36 @@ class AvatarStreamHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == "/health":
             status = HTTPStatus.OK if self.state.video_path.exists() else HTTPStatus.SERVICE_UNAVAILABLE
             self.send_json(self.state.health(), status)
+            return
+        if path == "/sync-status":
+            session_id = (query.get("session_id") or [""])[0]
+            payload = self.state.sync_status(session_id)
+            self.send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.NOT_FOUND)
+            return
+        if path == "/sync-frame":
+            session_id = (query.get("session_id") or [""])[0]
+            try:
+                time_ms = float((query.get("t") or ["0"])[0])
+            except ValueError:
+                time_ms = 0.0
+            frame, meta = self.state.sync_frame(session_id, time_ms)
+            if not frame:
+                self.send_json(meta, HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(frame)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("X-Frame-Index", str(meta.get("frame_index", "")))
+            self.end_headers()
+            self.wfile.write(frame)
             return
         if path == "/idle.mjpg":
             self.serve_mjpeg()
@@ -160,11 +295,47 @@ class AvatarStreamHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        if path == "/begin-sync":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                self.send_json(
+                    self.state.begin_sync(
+                        str(payload.get("session_id") or ""),
+                        float(payload.get("fps") or self.state.fps),
+                    )
+                )
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/finish-sync":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                self.send_json(self.state.finish_sync(str(payload.get("session_id") or "")))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/push-frame":
             try:
                 length = int(self.headers.get("Content-Length") or 0)
-                self.send_json(self.state.push_frame(self.rfile.read(length)))
+                session_id = (query.get("session_id") or [""])[0]
+                try:
+                    frame_index = int((query.get("frame_index") or ["0"])[0])
+                except ValueError:
+                    frame_index = 0
+                try:
+                    fps = float((query.get("fps") or [str(self.state.fps)])[0])
+                except ValueError:
+                    fps = self.state.fps
+                frame = self.rfile.read(length)
+                if session_id:
+                    self.send_json(self.state.push_sync_frame(session_id, frame_index, frame, fps))
+                else:
+                    self.send_json(self.state.push_frame(frame))
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

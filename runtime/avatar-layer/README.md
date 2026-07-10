@@ -69,6 +69,34 @@ During `/realtime-lipsync`, MuseTalk pushes each blended mouth frame to `/push-f
 
 This reduces the "nothing happens until mp4 is ready" feeling, but audio is still delivered as a completed WAV/MP4 artifact. True real-time conversation still needs audio streaming plus a WebRTC/LiveKit transport.
 
+## Stage D: Audio-Clock Sync
+
+For lip-sync correctness, the browser must not display pushed frames merely because they arrived. The stream worker now supports sync sessions:
+
+```text
+POST /begin-sync
+{"session_id":"<avatar-job-id>","fps":25}
+
+POST /push-frame?session_id=<avatar-job-id>&frame_index=42&fps=25
+Content-Type: image/jpeg
+<jpeg bytes>
+
+GET /sync-frame?session_id=<avatar-job-id>&t=1680
+```
+
+The avatar page treats audio as the master clock. It plays the WAV only after a small frame buffer exists, then renders frames to a canvas by `audio.currentTime`. If the target frame has not arrived yet, audio pauses briefly and resumes when the frame is available. This favors mouth/audio sync over raw smoothness.
+
+## Stage E: Low-Latency Avatar Profile
+
+For real-time avatar trials, the dashboard now uses a `fast_avatar` generation profile:
+
+- The relationship-graph draft prompt is constrained to one very short message.
+- MuseTalk runs at a lower default FPS (`lipsync_fps`, default `12`).
+- MuseTalk uses a larger worker batch size (`lipsync_batch_size`, default `8`).
+- The worker can skip final MP4 muxing (`lipsync_skip_video`, default `true`) and publish synchronized frames directly to the live canvas.
+
+This reduces perceived latency by shrinking text, audio duration, generated frame count, and post-processing. It does not remove the remaining first-audio bottleneck from IndexTTS2; if the experience is still too slow, the next optimization should target TTS first-token/first-chunk latency or a faster voice path.
+
 ## 环境变量契约
 
 ### 头像图
