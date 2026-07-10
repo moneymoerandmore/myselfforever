@@ -36,6 +36,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_DIR = Path(__file__).resolve().parent
 DRAFT_GENERATOR_PATH = ROOT / "tools" / "draft-generator" / "draft_generator.py"
 SELF_CORE_PATH = ROOT / "runtime" / "self-core" / "SelfCore.v0.1.md"
+IDENTITY_FACTS_DIR = ROOT / "runtime" / "self-core" / "identity-facts"
+IDENTITY_FACTS_PATH = IDENTITY_FACTS_DIR / "facts.jsonl"
+IDENTITY_FACT_CORRECTIONS_PATH = IDENTITY_FACTS_DIR / "corrections.jsonl"
 DYADIC_PROFILES_PATH = ROOT / "runtime" / "dyadic-profiles" / "profiles.json"
 MULTIMODAL_INTAKE_DIR = ROOT / "data" / "generated" / "multimodal-intake"
 MULTIMODAL_ASR_DIR = ROOT / "data" / "generated" / "multimodal-asr"
@@ -44,6 +47,7 @@ MULTIMODAL_CONFIRM_DIR = ROOT / "data" / "generated" / "multimodal-confirmations
 NEWS_ALIGNMENT_DIR = ROOT / "data" / "generated" / "news-alignment"
 MULTIMODAL_MEMORY_DIR = ROOT / "runtime" / "multimodal-memory"
 MULTIMODAL_MEMORY_PATH = MULTIMODAL_MEMORY_DIR / "confirmed-features.jsonl"
+LEGACY_USER_CORRECTIONS_MEMORY_PATH = MULTIMODAL_MEMORY_DIR / "user-corrections.jsonl"
 NEWS_ALIGNMENT_MEMORY_DIR = ROOT / "runtime" / "self-alignment"
 NEWS_ALIGNMENT_MEMORY_PATH = NEWS_ALIGNMENT_MEMORY_DIR / "news-alignment-candidates.jsonl"
 SPEAKER_PROFILE_DIR = ROOT / "runtime" / "speaker-profiles"
@@ -632,6 +636,15 @@ def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
             result["tone_basis"] = "poe_model_chose_no_reply"
             return result
         segments = normalize_chat_style(model_text)
+        segments, personality_guard_notes = enforce_personality_fact_boundaries(segments)
+        if personality_guard_notes:
+            result["personality_guard"] = {
+                "status": "rewritten",
+                "notes": personality_guard_notes,
+            }
+            result["questions_for_user"].extend(personality_guard_notes)
+        else:
+            result["personality_guard"] = {"status": "passed", "notes": []}
         result["draft_segments"] = segments
         result["draft_text"] = "\n".join(segments)
         result["no_reply"] = len(segments) == 0
@@ -715,6 +728,7 @@ def avatar_env_config() -> dict[str, str]:
                     "base_video_path": str(payload.get("base_video_path") or "").strip(),
                     "tts_command": str(payload.get("tts_command") or "").strip(),
                     "tts_worker_url": str(payload.get("tts_worker_url") or "").strip(),
+                    "stream_worker_url": str(payload.get("stream_worker_url") or "").strip(),
                     "liveportrait_command": str(payload.get("liveportrait_command") or "").strip(),
                     "lipsync_command": str(payload.get("lipsync_command") or "").strip(),
                     "lipsync_worker_url": str(payload.get("lipsync_worker_url") or "").strip(),
@@ -732,6 +746,8 @@ def avatar_env_config() -> dict[str, str]:
         or file_config.get("tts_command", ""),
         "tts_worker_url": os.environ.get("DIGITAL_TWIN_TTS_WORKER_URL", "").strip()
         or file_config.get("tts_worker_url", ""),
+        "stream_worker_url": os.environ.get("AVATAR_STREAM_WORKER_URL", "").strip()
+        or file_config.get("stream_worker_url", ""),
         "liveportrait_command": os.environ.get("LIVEPORTRAIT_RENDER_COMMAND", "").strip()
         or file_config.get("liveportrait_command", ""),
         "lipsync_command": os.environ.get("AVATAR_LIPSYNC_COMMAND", "").strip()
@@ -752,7 +768,7 @@ def avatar_layer_status() -> dict[str, Any]:
     return {
         "layer": "external_interaction.avatar",
         "provider": "liveportrait_local",
-        "phase": "stage_1_text_to_avatar",
+        "phase": "relationship_graph_avatar_live_surface",
         "output_dir": str(AVATAR_LAYER_DIR),
         "asset_dir": str(AVATAR_ASSET_DIR),
         "config_path": str(AVATAR_CONFIG_PATH),
@@ -766,6 +782,16 @@ def avatar_layer_status() -> dict[str, Any]:
             "path": str(base_video_path) if base_video_path else "",
             "exists": bool(base_video_path and base_video_path.exists()),
             "note": "When configured, per-message LivePortrait rendering is skipped.",
+        },
+        "stream": {
+            "configured": bool(config["stream_worker_url"]),
+            "worker_url": config["stream_worker_url"],
+            "worker": probe_avatar_worker(config["stream_worker_url"]),
+            "idle_stream_url": avatar_worker_url(config["stream_worker_url"], "/idle.mjpg")
+            if config["stream_worker_url"]
+            else "",
+            "mode": "mjpeg_idle_live",
+            "env": "AVATAR_STREAM_WORKER_URL",
         },
         "tts": {
             "configured": bool(config["tts_command"] or config["tts_worker_url"]),
@@ -851,11 +877,40 @@ def get_avatar_job(job_id: str) -> dict[str, Any]:
 
 def write_avatar_job(job_dir: Path, job: dict[str, Any]) -> None:
     job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    update_avatar_latency_summary(job)
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "job.json").write_text(
         json.dumps(job, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def update_avatar_latency_summary(job: dict[str, Any]) -> None:
+    metrics = job.setdefault("metrics", {})
+    started_at = metrics.get("started_at_epoch")
+    if isinstance(started_at, (int, float)):
+        metrics["elapsed_seconds"] = round(time.time() - float(started_at), 2)
+    steps = job.get("steps") or []
+    slowest = None
+    for step in steps:
+        try:
+            duration = float(step.get("duration_seconds") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if slowest is None or duration > slowest.get("duration_seconds", 0):
+            slowest = {
+                "name": step.get("name") or "unknown",
+                "duration_seconds": round(duration, 2),
+                "mode": step.get("mode") or "",
+            }
+    if slowest:
+        metrics["slowest_step"] = slowest
+    target = float(metrics.get("target_seconds") or 2.5)
+    elapsed = float(metrics.get("elapsed_seconds") or 0)
+    metrics["target_seconds"] = target
+    metrics["realtime_viable"] = bool(elapsed and elapsed <= target)
+    if elapsed > target:
+        metrics["latency_note"] = "Current MP4-file pipeline is demo-grade, not real-time conversation."
 
 
 def format_avatar_command(template: str, paths: dict[str, Path]) -> str:
@@ -927,6 +982,29 @@ def call_avatar_worker(
     }
 
 
+def publish_avatar_video_to_stream(config: dict[str, str], video_path: Path) -> dict[str, Any]:
+    stream_worker_url = config.get("stream_worker_url", "")
+    if not stream_worker_url:
+        return {
+            "mode": "stream_worker_not_configured",
+            "returncode": 0,
+            "duration_seconds": 0,
+        }
+    started = time.time()
+    result = call_avatar_worker(
+        stream_worker_url,
+        "/play-video",
+        {"video_path": str(video_path.resolve())},
+        timeout_seconds=10,
+    )
+    return {
+        "mode": "stream_worker",
+        "returncode": 0,
+        "duration_seconds": round(time.time() - started, 2),
+        "worker_result": result,
+    }
+
+
 def call_lipsync_worker(
     config: dict[str, str],
     render_output_path: Path,
@@ -946,6 +1024,7 @@ def call_lipsync_worker(
                 "output_path": str(output_path),
                 "job_dir": str(job_dir),
                 "fps": 25,
+                "stream_worker_url": config.get("stream_worker_url", ""),
             },
         )
         result["mode"] = "worker_realtime"
@@ -1115,6 +1194,7 @@ def generate_avatar_audio_chunks(
 def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     draft_text = str(payload.get("draft_text") or "").strip()
     draft_result: dict[str, Any] | None = None
+    draft_started = time.time()
     if not draft_text:
         draft_result = generate_draft(payload)
         draft_text = str(draft_result.get("draft_text") or "").strip()
@@ -1135,7 +1215,9 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
         "id": job_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "provider": "liveportrait_local",
-        "phase": "stage_1_text_to_avatar",
+        "phase": "relationship_graph_to_avatar",
+        "interaction_core": "relationship_graph_draft",
+        "multimodal_surface": str(payload.get("multimodal_output_surface") or "avatar"),
         "status": "created",
         "person_query": str(payload.get("query") or "").strip(),
         "scenario": str(payload.get("scenario") or "").strip(),
@@ -1145,6 +1227,11 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             "text": f"/api/avatar/jobs/{job_id}/files/reply.txt",
         },
         "steps": [],
+        "metrics": {
+            "started_at_epoch": time.time(),
+            "target_seconds": 2.5,
+            "architecture": "mp4_file_pipeline",
+        },
         "config": {
             "source_image_path": str(source_image) if source_image else "",
             "base_video_path": str(base_video) if base_video else "",
@@ -1154,10 +1241,19 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             "renderer_configured": bool(config["liveportrait_command"]),
             "lipsync_configured": has_lipsync,
             "lipsync_worker_url": config["lipsync_worker_url"],
+            "stream_worker_url": config["stream_worker_url"],
         },
     }
     job_dir.mkdir(parents=True, exist_ok=True)
     text_path.write_text(draft_text, encoding="utf-8")
+    job["steps"].append(
+        {
+            "name": "draft",
+            "mode": "provided_text" if draft_result is None else "poe_model",
+            "returncode": 0,
+            "duration_seconds": round(time.time() - draft_started, 2),
+        }
+    )
     write_avatar_job(job_dir, job)
 
     if not source_image or not source_image.exists():
@@ -1298,9 +1394,22 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
             job["message"] = "Lip-sync command failed or did not create avatar.mp4."
             write_avatar_job(job_dir, job)
             return job
-    job["status"] = "completed"
-    job["message"] = "Avatar video rendered."
     job["files"]["video"] = f"/api/avatar/jobs/{job_id}/files/avatar.mp4"
+    try:
+        job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
+        job["message"] = "Avatar video rendered and sent to live stream."
+    except Exception as exc:
+        job["steps"].append(
+            {
+                "name": "stream_publish",
+                "mode": "stream_worker",
+                "returncode": 1,
+                "duration_seconds": 0,
+                "error": str(exc),
+            }
+        )
+        job["message"] = "Avatar video rendered, but live stream publish failed."
+    job["status"] = "completed"
     write_avatar_job(job_dir, job)
     return job
 
@@ -1313,7 +1422,9 @@ def start_avatar_reply_job(payload: dict[str, Any]) -> dict[str, Any]:
         "id": job_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "provider": "liveportrait_local",
-        "phase": "stage_1_streaming_text_to_avatar",
+        "phase": "relationship_graph_to_avatar",
+        "interaction_core": "relationship_graph_draft",
+        "multimodal_surface": str(payload.get("multimodal_output_surface") or "avatar"),
         "status": "queued",
         "person_query": str(payload.get("query") or "").strip(),
         "scenario": str(payload.get("scenario") or "").strip(),
@@ -1322,6 +1433,11 @@ def start_avatar_reply_job(payload: dict[str, Any]) -> dict[str, Any]:
         "files": {},
         "audio_chunks": [],
         "steps": [],
+        "metrics": {
+            "started_at_epoch": time.time(),
+            "target_seconds": 2.5,
+            "architecture": "mp4_file_pipeline",
+        },
         "config": {
             "source_image_path": config["source_image_path"],
             "base_video_path": config["base_video_path"],
@@ -1331,6 +1447,7 @@ def start_avatar_reply_job(payload: dict[str, Any]) -> dict[str, Any]:
             "renderer_configured": bool(config["liveportrait_command"]),
             "lipsync_configured": bool(config["lipsync_command"] or config["lipsync_worker_url"]),
             "lipsync_worker_url": config["lipsync_worker_url"],
+            "stream_worker_url": config["stream_worker_url"],
             "streaming": True,
         },
         "message": "Avatar job queued.",
@@ -1356,6 +1473,7 @@ def run_avatar_reply_job(payload: dict[str, Any], job_dir: Path, job: dict[str, 
         job["message"] = "Generating reply text."
         write_avatar_job(job_dir, job)
 
+        draft_started = time.time()
         draft_text = str(payload.get("draft_text") or "").strip()
         draft_result: dict[str, Any] | None = None
         if not draft_text:
@@ -1367,6 +1485,14 @@ def run_avatar_reply_job(payload: dict[str, Any], job_dir: Path, job: dict[str, 
         job["draft_result"] = draft_result
         job["files"]["text"] = f"/api/avatar/jobs/{job['id']}/files/reply.txt"
         text_path.write_text(draft_text, encoding="utf-8")
+        job["steps"].append(
+            {
+                "name": "draft",
+                "mode": "provided_text" if draft_result is None else "poe_model",
+                "returncode": 0,
+                "duration_seconds": round(time.time() - draft_started, 2),
+            }
+        )
         write_avatar_job(job_dir, job)
 
         if not source_image or not source_image.exists():
@@ -1470,9 +1596,22 @@ def run_avatar_reply_job(payload: dict[str, Any], job_dir: Path, job: dict[str, 
                 write_avatar_job(job_dir, job)
                 return
 
-        job["status"] = "completed"
-        job["message"] = "Avatar video rendered."
         job["files"]["video"] = f"/api/avatar/jobs/{job['id']}/files/avatar.mp4"
+        try:
+            job["steps"].append({"name": "stream_publish", **publish_avatar_video_to_stream(config, output_path)})
+            job["message"] = "Avatar video rendered and sent to live stream."
+        except Exception as exc:
+            job["steps"].append(
+                {
+                    "name": "stream_publish",
+                    "mode": "stream_worker",
+                    "returncode": 1,
+                    "duration_seconds": 0,
+                    "error": str(exc),
+                }
+            )
+            job["message"] = "Avatar video rendered, but live stream publish failed."
+        job["status"] = "completed"
         write_avatar_job(job_dir, job)
     except Exception as exc:
         job["status"] = "render_failed"
@@ -5045,6 +5184,36 @@ def normalize_chat_style(value: str, max_segments: int = 3, max_chars: int = 22)
     return [fallback]
 
 
+PERSONALITY_FACT_REWRITES = [
+    (
+        re.compile(r"(我来下单还是做都行|我来做也行|我做也行|我来下厨|我下厨|我来做饭|我可以做饭|我会做饭|我给你做|我做给你|我来烧|我烧给你)"),
+        "我来下单就行",
+        "已按用户校对改写：数字我不能自称会做饭或愿意做饭。",
+    ),
+    (
+        re.compile(r"(我开车去接你|我开车接你|我来开车接|我开车送你|我来开车送|我直接开车过去|我现在开车过去)"),
+        "我先看下状态，能接就接",
+        "已按身份事实降级：可以默认用户会开车，但不能替用户承诺当前一定能开或适合开。",
+    ),
+]
+
+
+def enforce_personality_fact_boundaries(segments: list[str]) -> tuple[list[str], list[str]]:
+    rewritten: list[str] = []
+    notes: list[str] = []
+    for segment in segments:
+        cleaned = segment
+        for pattern, replacement, note in PERSONALITY_FACT_REWRITES:
+            if pattern.search(cleaned):
+                cleaned = pattern.sub(replacement, cleaned)
+                if note not in notes:
+                    notes.append(note)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            rewritten.append(cleaned)
+    return rewritten, notes
+
+
 def normalize_conversation_history(value: Any) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -5096,6 +5265,40 @@ def confirmed_multimodal_memory_excerpt(limit: int = 30) -> str:
         if candidate:
             output.append(f"- [{scope}/{confidence}] {candidate}")
     return "\n".join(output) or "（暂无已确认的多模态记忆）"
+
+
+def identity_facts_excerpt(limit: int = 30) -> str:
+    paths = [
+        IDENTITY_FACTS_PATH,
+        IDENTITY_FACT_CORRECTIONS_PATH,
+        LEGACY_USER_CORRECTIONS_MEMORY_PATH,
+    ]
+    if not any(path.exists() for path in paths):
+        return "（暂无已确认的本我身份事实）"
+    lines: list[str] = []
+    for path in paths:
+        if path.exists():
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+    records: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    output = []
+    for item in records:
+        confidence = str(item.get("confidence") or "medium")
+        fact_type = str(item.get("fact_type") or item.get("scope") or "identity_fact")
+        candidate = str(item.get("statement") or item.get("candidate") or "").strip()
+        runtime_rule = str(item.get("runtime_rule") or "").strip()
+        if candidate:
+            line = f"- [{fact_type}/{confidence}] {candidate}"
+            if runtime_rule:
+                line += f" 运行时规则：{runtime_rule}"
+            output.append(line)
+    return "\n".join(output) or "（暂无已确认的本我身份事实）"
 
 
 def confirmed_news_alignment_memory_excerpt(limit: int = 30) -> str:
@@ -5235,7 +5438,10 @@ def build_model_prompt(
 - 不确定当前事实时，只对群友已经说出的内容作回应，或提出短问题；不要用旧知识猜当前状态。
 - 不得向群友询问“你们在聊什么”“现在什么话题”“发生什么了”来弥补上下文不足，这不像用户本人。
 - 自动模式下，如果长上下文仍不足以理解最后 1-3 条，就输出 `__NO_REPLY__`，不要暴露自己没看懂；人工强制生成时也只能基于接话窗口给出最小回应，不能反问聊天主题。
-- 联系人的双人沟通画像优先于通用 SelfCore，必须按该对象的真实句长、节奏、主动性、话题和表达机制生成。
+- 本我身份事实是硬约束，优先级高于 RelationshipGraph、DyadicProfile、当前关系氛围和玩笑语境。
+- 社会关系只决定怎么说、亲密度、玩笑强度和共同话题；不得覆盖“我会什么/不会什么/愿不愿意承诺/能不能自称”的身份事实。
+- 如果关系上下文诱导你说出与身份事实冲突的话，必须改写为不冲突的说法；改不掉就输出 `__NO_REPLY__`。
+- 联系人的双人沟通画像优先于通用表达风格，但不能优先于本我身份事实；必须按该对象的真实句长、节奏、主动性、话题和表达机制生成。
 - 统计画像描述的是机制和分布，不是要求每条消息都塞入全部特征。
 - 如果双人画像置信度不足，保守生成，不得用“家人/同事/朋友模板”脑补。
 - 不要机械使用“先别急”“安顿情绪”“谁对谁错”“关键是边界和责任”“你已经做很多了”。
@@ -5247,6 +5453,9 @@ def build_model_prompt(
 
 SelfCore 表达摘要：
 {self_core_excerpt()}
+
+本我身份事实：
+{identity_facts_excerpt()}
 
 已确认的多模态记忆：
 {confirmed_multimodal_memory_excerpt()}

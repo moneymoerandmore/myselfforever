@@ -30,6 +30,45 @@ POST /api/avatar/reply
 
 `data/generated/` 已被 `.gitignore` 排除，音视频产物不会进入仓库。
 
+## Stage A: Idle Live Surface
+
+`avatar_stream_worker.py` loops the cached idle video as a local MJPEG stream. This is the first always-on digital-human surface: the page can show a persistent live avatar before any per-message rendering finishes.
+
+Run it with the MuseTalk environment because that environment already has OpenCV:
+
+```powershell
+& "D:\AI\MuseTalk\.venv\Scripts\python.exe" runtime\avatar-layer\avatar_stream_worker.py --host 127.0.0.1 --port 8813 --video runtime\avatar-layer\cache\base_idle.mp4
+```
+
+Dashboard status reads `stream_worker_url` from `runtime/avatar-layer/config.json` or `AVATAR_STREAM_WORKER_URL`, then exposes `/idle.mjpg` on the avatar page. This is an interim transport. The next step is to replace MJPEG with WebRTC/LiveKit-style frame injection while keeping the same relationship-graph communication core.
+
+## Stage B: Speaking Clip Injection
+
+The stream worker also accepts:
+
+```text
+POST /play-video
+{"video_path":"D:\\path\\to\\avatar.mp4"}
+```
+
+When a MuseTalk job finishes, the dashboard pushes the generated speaking clip to the stream worker. The browser keeps watching the same `/idle.mjpg` live surface; the stream switches from idle to the speaking clip, then returns to idle after the clip ends. This removes the split-brain UI where idle is one surface and speech is a separate video player.
+
+This is still a transitional design: the speaking frames are injected after clip generation, not streamed frame-by-frame as MuseTalk produces them. The final target remains low-latency WebRTC/LiveKit-style frame and audio transport.
+
+## Stage C: Inference Frame Push
+
+The stream worker accepts raw JPEG frames:
+
+```text
+POST /push-frame
+Content-Type: image/jpeg
+<jpeg bytes>
+```
+
+During `/realtime-lipsync`, MuseTalk pushes each blended mouth frame to `/push-frame` as soon as it is produced. The MJPEG client keeps the same `/idle.mjpg` connection and shows the latest inference frame while generation is running. If no frame arrives for about two seconds, the stream falls back to the idle video.
+
+This reduces the "nothing happens until mp4 is ready" feeling, but audio is still delivered as a completed WAV/MP4 artifact. True real-time conversation still needs audio streaming plus a WebRTC/LiveKit transport.
+
 ## 环境变量契约
 
 ### 头像图
@@ -141,3 +180,16 @@ $env:LIVEPORTRAIT_RENDER_COMMAND="python D:\path\to\liveportrait_adapter.py --im
 - LivePortrait 只负责形象层，不负责“像不像我地判断该说什么”。
 - 第一阶段只处理文本输入；麦克风和摄像头会作为输入层升级，不改 avatar provider 的输出接口。
 - 自动发送和真实对外交互仍受 CommunicationPolicy 约束；形象层完成不等于自动授权。
+## Architecture Boundary: Relationship Core First
+
+Avatar is a multimodal input/output surface for the existing relationship-graph communication system. It must not become an independent chat logic.
+
+Runtime order:
+
+1. Resolve the person or group context from `RelationshipGraph`.
+2. Build conversation history using the same role structure as the main dashboard.
+3. Generate the reply through the existing `/api/draft` path, using `SelfCore`, identity facts, `RelationshipGraph`, `DyadicProfile`, and `CommunicationPolicy`.
+4. Pass only the approved draft text to TTS and lip-sync.
+5. Render voice/video as output artifacts.
+
+Microphone and camera input should enter the same pipeline: ASR, visual context, and emotion cues are input evidence for relationship-aware generation, not a separate persona or standalone assistant.

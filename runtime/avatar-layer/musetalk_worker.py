@@ -18,6 +18,7 @@ import threading
 import time
 import types
 from typing import Any
+import urllib.request
 from uuid import uuid4
 
 
@@ -99,6 +100,29 @@ def run_command(command: list[str], cwd: Path) -> None:
     completed = subprocess.run(command, cwd=str(cwd))
     if completed.returncode != 0:
         raise RuntimeError(f"command failed with exit code {completed.returncode}")
+
+
+def push_frame_to_stream(stream_worker_url: str, frame: Any, jpeg_quality: int = 82) -> bool:
+    if not stream_worker_url:
+        return False
+    import cv2
+
+    encoded_ok, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), max(40, min(95, jpeg_quality))],
+    )
+    if not encoded_ok:
+        return False
+    req = urllib.request.Request(
+        stream_worker_url.rstrip("/") + "/push-frame",
+        data=encoded.tobytes(),
+        headers={"Content-Type": "image/jpeg"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=0.5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return bool(payload.get("ok"))
 
 
 class MuseTalkWorker:
@@ -333,6 +357,7 @@ class MuseTalkWorker:
         video_path: Path | None = None,
         batch_size: int | None = None,
         fps: int = 25,
+        stream_worker_url: str = "",
     ) -> dict[str, Any]:
         import cv2
         import numpy as np
@@ -357,7 +382,15 @@ class MuseTalkWorker:
         temp_video = work_dir / "temp.mp4"
 
         started = time.time()
+        audio_feature_seconds = 0.0
+        model_seconds = 0.0
+        encode_seconds = 0.0
+        mux_seconds = 0.0
+        stream_push_seconds = 0.0
+        stream_frame_count = 0
+        stream_push_failures = 0
         with self.lock:
+            audio_started = time.time()
             whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
                 str(audio_path),
                 weight_dtype=self.weight_dtype,
@@ -372,6 +405,7 @@ class MuseTalkWorker:
                 audio_padding_length_left=2,
                 audio_padding_length_right=2,
             )
+            audio_feature_seconds = round(time.time() - audio_started, 2)
             gen = datagen(
                 whisper_chunks,
                 avatar["latents"],
@@ -379,6 +413,7 @@ class MuseTalkWorker:
             )
             frame_index = 0
             total = int(np.ceil(float(len(whisper_chunks)) / (batch_size or self.batch_size)))
+            model_started = time.time()
             with self.torch.no_grad():
                 for whisper_batch, latent_batch in tqdm(gen, total=total):
                     audio_feature_batch = self.pe(whisper_batch.to(self.device))
@@ -404,8 +439,20 @@ class MuseTalkWorker:
                         mask_crop_box = avatar["mask_coords"][frame_index % len(avatar["mask_coords"])]
                         combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
                         cv2.imwrite(str(frame_dir / f"{frame_index:08d}.png"), combine_frame)
+                        if stream_worker_url:
+                            push_started = time.time()
+                            try:
+                                if push_frame_to_stream(stream_worker_url, combine_frame):
+                                    stream_frame_count += 1
+                                else:
+                                    stream_push_failures += 1
+                            except Exception:
+                                stream_push_failures += 1
+                            stream_push_seconds += time.time() - push_started
                         frame_index += 1
+            model_seconds = round(time.time() - model_started, 2)
 
+            encode_started = time.time()
             run_command(
                 [
                     "ffmpeg",
@@ -428,6 +475,8 @@ class MuseTalkWorker:
                 ],
                 self.repo,
             )
+            encode_seconds = round(time.time() - encode_started, 2)
+            mux_started = time.time()
             run_command(
                 [
                     "ffmpeg",
@@ -442,12 +491,22 @@ class MuseTalkWorker:
                 ],
                 self.repo,
             )
+            mux_seconds = round(time.time() - mux_started, 2)
 
         return {
             "video_path": str(output_path),
             "avatar_id": safe_avatar_id,
             "frame_count": frame_index,
             "inference_seconds": round(time.time() - started, 2),
+            "timings": {
+                "audio_feature_seconds": audio_feature_seconds,
+                "model_and_frame_seconds": model_seconds,
+                "encode_seconds": encode_seconds,
+                "mux_seconds": mux_seconds,
+                "stream_push_seconds": round(stream_push_seconds, 2),
+                "stream_frame_count": stream_frame_count,
+                "stream_push_failures": stream_push_failures,
+            },
             "model_load_seconds": self.load_seconds,
             "realtime_avatar": avatar_pack["meta"],
             "work_dir": str(work_dir),
@@ -705,6 +764,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     video_path=Path(video_value).resolve() if video_value else None,
                     batch_size=int(payload.get("batch_size") or self.worker.batch_size),
                     fps=int(payload.get("fps") or 25),
+                    stream_worker_url=str(payload.get("stream_worker_url") or "").strip(),
                 )
             else:
                 result = self.worker.lipsync(

@@ -4,7 +4,7 @@
 
 当前项目采用“数字我五层架构”：
 
-1. 本我层：`SelfCore`，沉淀三观、判断方式、表达 DNA 和边界。
+1. 本我层：`SelfCore`，沉淀三观、判断方式、表达 DNA、边界和身份事实。
 2. 表我层：`RelationshipGraph`、`DyadicProfile`、`CommunicationPolicy`，沉淀不同人眼里的我、亲密度、共同话题、表达风格和权限。
 3. 现实信息输入层：微信聊天记录、多模态材料、关系线索、外部事件，生成证据和候选。
 4. 真我-数字我持续对齐层：每日新闻、观点校对、回复纠错、关系修正，反馈到本我和表我。
@@ -24,14 +24,16 @@
 
 ## 阶段 1：本我初始化
 
-目标：先让系统能回答“我会怎么看”，并把三观、判断方式、表达 DNA 和边界沉淀到 `SelfCore`。
+目标：先让系统能回答“我会怎么看”，并把三观、判断方式、表达 DNA、边界和身份事实沉淀到 `SelfCore`。
 
 待做：
 
 - 生成 `SelfCore v0.1`：已完成初稿，见 `runtime/self-core/SelfCore.v0.1.md`
 - 定义 `SelfCore` schema：已完成初稿，见 `runtime/self-core/schema.md`
+- 定义身份事实子模块：已建立 `runtime/self-core/identity-facts/`，用于承载“我会什么 / 不会什么 / 偏好 / 生活约束 / 禁止自称”等稳定本我事实。
 - 建立 30-50 条评估用例：已完成 30 条初稿，见 `evals/cases/selfcore-v0.1.md`
 - 下一步：用每日新闻对齐和不像我反馈继续生成 SelfCore 候选，而不是直接改写本我。
+- 下一步：从历史聊天记录和持续交互反馈中抽取 `IdentityFactCandidate`，经确认后进入 `runtime/self-core/identity-facts/facts.jsonl`。
 
 ## 阶段 2：表我初始化
 

@@ -7,6 +7,10 @@ const intentInput = document.querySelector("#intent");
 const modeInput = document.querySelector("#mode");
 const scenarioInput = document.querySelector("#scenario");
 const contextTextInput = document.querySelector("#contextText");
+const relationName = document.querySelector("#relationName");
+const relationSubtitle = document.querySelector("#relationSubtitle");
+const permissionSummary = document.querySelector("#permissionSummary");
+const dyadicSummary = document.querySelector("#dyadicSummary");
 const refreshButton = document.querySelector("#refreshButton");
 const renderButton = document.querySelector("#renderButton");
 const providerSummary = document.querySelector("#providerSummary");
@@ -15,6 +19,7 @@ const providerGrid = document.querySelector("#providerGrid");
 const jobSummary = document.querySelector("#jobSummary");
 const jobBadge = document.querySelector("#jobBadge");
 const replyText = document.querySelector("#replyText");
+const avatarLiveStream = document.querySelector("#avatarLiveStream");
 const avatarAudio = document.querySelector("#avatarAudio");
 const avatarVideo = document.querySelector("#avatarVideo");
 const jobsList = document.querySelector("#jobsList");
@@ -25,9 +30,6 @@ const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 let people = [];
 let activeJobId = null;
 let activeJobTimer = null;
-let playedAudioChunks = new Set();
-let audioQueue = [];
-let audioPlaying = false;
 
 function setHealth(ok, text) {
   healthStatus.textContent = text;
@@ -45,12 +47,17 @@ function setBadge(element, status) {
   else element.classList.add("risk-r1");
 }
 
+function compactText(value, fallback = "--") {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
 function restoreSettings() {
   try {
     poeApiKeyInput.value = localStorage.getItem(POE_API_KEY_STORAGE_KEY) || "";
     poeModelInput.value = localStorage.getItem(POE_MODEL_STORAGE_KEY) || poeModelInput.value;
   } catch {
-    // Ignore disabled browser storage.
+    // Browser storage may be disabled.
   }
 }
 
@@ -87,11 +94,65 @@ function contextHistory() {
     .filter(Boolean)
     .slice(-40)
     .map((line) => {
-      const normalized = line.replace(/^我[:：]/, "self:").replace(/^对方[:：]/, "contact:");
+      const normalized = line
+        .replace(/^我[:：]/, "self:")
+        .replace(/^对方[:：]/, "contact:")
+        .replace(/^self[:：]/i, "self:")
+        .replace(/^contact[:：]/i, "contact:");
       if (normalized.startsWith("self:")) return { role: "self", content: normalized.slice(5).trim() };
       if (normalized.startsWith("contact:")) return { role: "contact", content: normalized.slice(8).trim() };
       return { role: "contact", content: line };
     });
+}
+
+function avatarConversationHistory() {
+  const history = contextHistory();
+  const scenario = scenarioInput.value.trim();
+  if (scenario) history.push({ role: "contact", content: scenario });
+  return history.slice(-40);
+}
+
+function renderRelationProfile() {
+  const person = selectedPerson();
+  if (!person) {
+    relationName.textContent = "未选择联系人";
+    relationSubtitle.textContent = "关系图谱画像会显示在这里";
+    permissionSummary.textContent = "--";
+    dyadicSummary.textContent = "--";
+    modeInput.disabled = false;
+    return;
+  }
+
+  const permission = person.permission || {};
+  const dyadic = person.dyadic_profile || {};
+  relationName.textContent = person.display_name || person.query || "未命名联系人";
+  relationSubtitle.textContent = [
+    compactText(person.objective_relationship, "关系未知"),
+    compactText(person.node_type, "节点类型未知"),
+    `样本 ${person.communication_total || 0} 条`,
+    `日均 ${Number(person.communication_daily_average || 0).toFixed(2)} 条`,
+  ].join(" / ");
+  permissionSummary.textContent = [
+    permission.note || "--",
+    `生成草稿：${permission.can_generate_draft ? "是" : "否"}`,
+    `主动建议：${permission.can_proactively_suggest ? "是" : "否"}`,
+    `自动发送：${permission.can_auto_send ? "是" : "否"}`,
+  ].join("；");
+  dyadicSummary.textContent = dyadic.available
+    ? [
+        `双人画像：${dyadic.confidence_level}`,
+        `私聊 ${dyadic.private_outgoing_count}/${dyadic.private_incoming_count}`,
+        `均/中位字数 ${dyadic.average_chars}/${dyadic.median_chars}`,
+        `话题 ${(dyadic.top_topics || []).join("、") || "不足"}`,
+      ].join("；")
+    : "暂无可用双人定向画像，生成时必须保守，不用关系大类模板脑补。";
+
+  if (person.group === "direct" && permission.can_generate_draft !== false) {
+    modeInput.disabled = false;
+  } else {
+    modeInput.value = "observe";
+    modeInput.disabled = true;
+  }
 }
 
 function renderPeopleOptions() {
@@ -101,6 +162,7 @@ function renderPeopleOptions() {
     option.value = "";
     option.textContent = "No contacts";
     personSelect.appendChild(option);
+    renderRelationProfile();
     return;
   }
   for (const person of people) {
@@ -109,6 +171,7 @@ function renderPeopleOptions() {
     option.textContent = `${person.display_name || person.query} / ${person.category || "uncategorized"}`;
     personSelect.appendChild(option);
   }
+  renderRelationProfile();
 }
 
 async function loadPeople() {
@@ -134,18 +197,28 @@ function workerText(worker) {
 function renderProviderStatus(status) {
   const sourceReady = Boolean(status.source_image?.configured && status.source_image?.exists);
   const baseReady = Boolean(status.base_video?.configured && status.base_video?.exists);
+  const streamReady = Boolean(status.stream?.configured && status.stream?.worker?.ok && status.stream?.idle_stream_url);
   const ttsReady = Boolean(status.tts?.configured);
   const rendererReady = Boolean(baseReady || status.renderer?.configured);
   const lipsyncReady = Boolean(status.lipsync?.configured);
-  const allReady = sourceReady && ttsReady && rendererReady && lipsyncReady;
+  const allReady = sourceReady && streamReady && ttsReady && rendererReady && lipsyncReady;
   providerBadge.textContent = allReady ? "ready" : "missing";
   providerBadge.className = `mode-badge ${allReady ? "mode-ok" : "mode-warn"}`;
   providerSummary.textContent = allReady
-    ? "Avatar layer is ready. Streaming audio chunks are enabled."
-    : "Avatar layer needs portrait, TTS, base video or renderer, and lip-sync.";
+    ? "形象层已进入永续直播态；表达内容仍由关系图谱交流内核生成。"
+    : "形象层需要头像、永续直播流、TTS、基础视频或渲染器、口型模块。";
+  if (streamReady) {
+    const streamUrl = `${status.stream.idle_stream_url}?t=${Date.now()}`;
+    if (avatarLiveStream.src !== streamUrl) avatarLiveStream.src = streamUrl;
+    avatarLiveStream.hidden = false;
+  } else {
+    avatarLiveStream.hidden = true;
+    avatarLiveStream.removeAttribute("src");
+  }
   providerGrid.innerHTML = "";
   providerGrid.append(
     providerItem("Portrait", sourceReady, sourceReady ? status.source_image.path : "set DIGITAL_TWIN_AVATAR_IMAGE"),
+    providerItem("Live stream", streamReady, streamReady ? status.stream.idle_stream_url : "start avatar stream worker on :8813"),
     providerItem("Base video", baseReady, baseReady ? "cached base video enabled" : "will render with LivePortrait"),
     providerItem("TTS", ttsReady, status.tts?.worker_url ? workerText(status.tts.worker) : "command mode"),
     providerItem("LipSync", lipsyncReady, status.lipsync?.worker_url ? workerText(status.lipsync.worker) : "command mode"),
@@ -170,13 +243,12 @@ function renderJobs(jobs) {
     item.className = "avatar-job";
     const videoLink = job.files?.video ? `<a href="${job.files.video}" target="_blank" rel="noreferrer">video</a>` : "";
     const audioLink = job.files?.audio ? `<a href="${job.files.audio}" target="_blank" rel="noreferrer">audio</a>` : "";
-    const chunks = job.files?.audio_chunks?.length ? `<span>${job.files.audio_chunks.length} chunks</span>` : "";
     item.innerHTML = `
       <div>
         <strong>${job.created_at || job.id} / ${job.status}</strong>
         <p>${job.person_query || "unknown"}: ${(job.draft_text || "").slice(0, 90)}</p>
       </div>
-      <div>${videoLink || audioLink || chunks || ""}</div>
+      <div>${videoLink || audioLink || ""}</div>
     `;
     jobsList.appendChild(item);
   }
@@ -193,39 +265,20 @@ function terminalJobStatus(status) {
   return status === "completed" || status?.includes("failed") || status?.includes("timeout") || status?.startsWith("needs_");
 }
 
-function enqueueAudioChunks(job) {
-  const chunks = job.files?.audio_chunks || [];
-  for (const url of chunks) {
-    if (!playedAudioChunks.has(url) && !audioQueue.includes(url)) audioQueue.push(url);
-  }
-  playNextAudioChunk();
-}
-
-async function playNextAudioChunk() {
-  if (audioPlaying || !audioQueue.length) return;
-  const url = audioQueue.shift();
-  if (!url) return;
-  playedAudioChunks.add(url);
-  audioPlaying = true;
-  avatarAudio.hidden = false;
-  avatarAudio.src = `${url}?t=${Date.now()}`;
-  avatarAudio.onended = () => {
-    audioPlaying = false;
-    playNextAudioChunk();
-  };
-  avatarAudio.onerror = () => {
-    audioPlaying = false;
-    playNextAudioChunk();
-  };
-  try {
-    await avatarAudio.play();
-  } catch {
-    audioPlaying = false;
-    setHealth(false, "Audio is ready. Press play in the audio control if autoplay is blocked.");
-  }
-}
-
 function renderJob(job) {
+  const metrics = job.metrics || {};
+  const slowest = metrics.slowest_step;
+  const draftResult = job.draft_result || {};
+  const stepLines = (job.steps || []).flatMap((step) => {
+    const lines = [`${step.name}: ${step.mode || "command"}, code=${step.returncode}, ${step.duration_seconds}s`];
+    const timings = step.worker_result?.timings;
+    if (timings) {
+      lines.push(
+        `  audio_feature=${timings.audio_feature_seconds}s, model_frames=${timings.model_and_frame_seconds}s, encode=${timings.encode_seconds}s, mux=${timings.mux_seconds}s`,
+      );
+    }
+    return lines;
+  });
   jobSummary.textContent = job.message || `job ${job.id}`;
   setBadge(jobBadge, job.status);
   replyText.textContent = [
@@ -233,8 +286,15 @@ function renderJob(job) {
     "",
     `status: ${job.status}`,
     job.message ? `message: ${job.message}` : "",
-    job.audio_chunks?.length ? `audio chunks: ${job.audio_chunks.filter((chunk) => chunk.status === "ready").length}/${job.audio_chunks.length}` : "",
-    ...(job.steps || []).map((step) => `${step.name}: ${step.mode || "command"}, code=${step.returncode}, ${step.duration_seconds}s`),
+    draftResult.tone_basis ? `tone_basis: ${draftResult.tone_basis}` : "",
+    draftResult.risk_level ? `risk: ${draftResult.risk_level}` : "",
+    draftResult.relationship_basis ? `relationship: ${draftResult.relationship_basis}` : "",
+    draftResult.topic_basis ? `topic: ${draftResult.topic_basis}` : "",
+    draftResult.personality_guard?.status ? `personality_guard: ${draftResult.personality_guard.status}` : "",
+    metrics.elapsed_seconds ? `elapsed: ${metrics.elapsed_seconds}s / target ${metrics.target_seconds || 2.5}s` : "",
+    slowest ? `slowest: ${slowest.name}, ${slowest.duration_seconds}s` : "",
+    metrics.latency_note ? `latency: ${metrics.latency_note}` : "",
+    ...stepLines,
   ]
     .filter(Boolean)
     .join("\n");
@@ -245,7 +305,10 @@ function renderJob(job) {
     avatarVideo.hidden = true;
     avatarVideo.removeAttribute("src");
   }
-  enqueueAudioChunks(job);
+  if (job.files?.audio && terminalJobStatus(job.status)) {
+    avatarAudio.hidden = false;
+    avatarAudio.src = `${job.files.audio}?t=${Date.now()}`;
+  }
 }
 
 async function pollAvatarJob(jobId) {
@@ -260,7 +323,7 @@ async function pollAvatarJob(jobId) {
     activeJobTimer = null;
     activeJobId = null;
     renderButton.disabled = false;
-    renderButton.textContent = "Generate avatar reply";
+    renderButton.textContent = "生成数字人回复";
     setHealth(job.status === "completed", job.status === "completed" ? "avatar job completed" : job.message || job.status);
   }
 }
@@ -279,9 +342,6 @@ function resetPlayback() {
   if (activeJobTimer) clearInterval(activeJobTimer);
   activeJobTimer = null;
   activeJobId = null;
-  playedAudioChunks = new Set();
-  audioQueue = [];
-  audioPlaying = false;
   avatarAudio.pause();
   avatarAudio.hidden = true;
   avatarAudio.removeAttribute("src");
@@ -293,6 +353,7 @@ async function renderAvatarReply() {
   const person = selectedPerson();
   const apiKey = poeApiKeyInput.value.trim();
   const scenario = scenarioInput.value.trim();
+  const history = avatarConversationHistory();
   if (!person) {
     setHealth(false, "select a contact first");
     personSelect.focus();
@@ -312,7 +373,7 @@ async function renderAvatarReply() {
   resetPlayback();
   renderButton.disabled = true;
   renderButton.textContent = "Generating...";
-  replyText.textContent = "Starting streaming avatar job. Audio chunks will play before the final video is ready.";
+  replyText.textContent = "Starting relationship-graph avatar job. Speaking output will be published back into the live stream when ready.";
   setBadge(jobBadge, "running");
   try {
     const response = await fetch("/api/avatar/reply", {
@@ -321,11 +382,13 @@ async function renderAvatarReply() {
       body: JSON.stringify({
         query: person.query,
         scenario,
-        conversation_history: contextHistory(),
+        conversation_history: history,
         poe_api_key: apiKey,
         poe_model: poeModelInput.value.trim(),
         intent: intentInput.value,
-        mode: person.group === "direct" ? modeInput.value : "observe",
+        mode: person.group === "direct" && person.permission?.can_generate_draft !== false ? modeInput.value : "observe",
+        relationship_graph_surface: true,
+        multimodal_output_surface: "avatar",
         streaming: true,
       }),
     });
@@ -333,14 +396,14 @@ async function renderAvatarReply() {
     if (!data.ok) throw new Error(data.error || "avatar generation failed");
     renderJob(data.result);
     startAvatarJobPolling(data.result.id);
-    setHealth(true, "streaming avatar job started");
+    setHealth(true, "relationship graph avatar job started");
   } catch (error) {
     replyText.textContent = `generation failed: ${error.message}`;
     jobSummary.textContent = "job failed";
     setBadge(jobBadge, "render_failed");
     setHealth(false, error.message);
     renderButton.disabled = false;
-    renderButton.textContent = "Generate avatar reply";
+    renderButton.textContent = "生成数字人回复";
   }
 }
 
@@ -358,6 +421,7 @@ poeApiKeyInput.addEventListener("change", cacheSettings);
 poeModelInput.addEventListener("change", cacheSettings);
 refreshButton.addEventListener("click", refreshAll);
 renderButton.addEventListener("click", renderAvatarReply);
+personSelect.addEventListener("change", renderRelationProfile);
 
 restoreSettings();
 Promise.all([loadPeople(), refreshAll()]).catch((error) => setHealth(false, error.message));

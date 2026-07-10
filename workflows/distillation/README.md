@@ -33,6 +33,8 @@ C:\Users\cloud\Documents\Codex\2026-06-03\skill\outputs
 ## 输出
 
 - `reports/pre-distillation-corpus-audit.md`
+- `reports/identity-fact-candidates.md`
+- `../../runtime/self-core/identity-facts/candidates.jsonl`
 
 报告只保留 episode ID、分数、标签和源文件哈希，不把聊天正文复制进仓库。
 
@@ -40,6 +42,12 @@ C:\Users\cloud\Documents\Codex\2026-06-03\skill\outputs
 
 ```powershell
 & "C:\Users\cloud\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" workflows\distillation\scripts\audit_wechat_distill_corpus.py
+```
+
+抽取身份事实候选：
+
+```powershell
+& "C:\Users\cloud\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" workflows\distillation\scripts\extract_identity_fact_candidates.py
 ```
 
 可指定输入和输出：
@@ -57,3 +65,4 @@ C:\Users\cloud\Documents\Codex\2026-06-03\skill\outputs
 - `counter` 用来补边界、误判、过度用力和不应自动发送的场景。
 - `copylike_or_long_burst` 与 `very_large_burst` 需要人工回看，避免把复制、转发或 AI 式长文当成真实表达。
 - `background_high_three_views` 如果出现，优先人工判断是否应升入 core。
+- 身份事实必须区分 confirmed fact 和 candidate。比如“完全不会做饭”来自用户显式校对，可以进入 `facts.jsonl`；“游泳能力”缺少直接证据，只能保持未知；“会开车”有多次第一人称证据，但仍要避免替用户承诺当下能开或愿意开。

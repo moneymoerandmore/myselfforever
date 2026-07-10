@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>数字人形象 · 数字分身</title>
+    <title>数字人形象 · 关系图谱多模态输出</title>
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/avatar.css" />
   </head>
@@ -12,7 +12,7 @@
       <header class="topbar">
         <div>
           <h1>数字人形象</h1>
-          <p>第五层 · 对外交互层 · LivePortrait 本地方案</p>
+          <p>第五层 · 对外交互层 · 关系图谱表达的多模态输出</p>
           <nav class="top-links" aria-label="Dashboard 页面">
             <a href="/">关系 / 群监控</a>
             <a href="/avatar.html">数字人形象</a>
@@ -40,8 +40,8 @@
         <aside class="avatar-card avatar-control-panel">
           <div class="avatar-section-head">
             <div>
-              <h2>输入</h2>
-              <p>选一个人，输入 TA 的内容，数字我生成回复后交给本地形象层。</p>
+              <h2>关系图谱输入</h2>
+              <p>先选关系节点，再由同一套关系图谱交流内核生成回复；本页只负责把回复变成声音和形象。</p>
             </div>
           </div>
 
@@ -51,6 +51,15 @@
               <option value="">加载关系链中...</option>
             </select>
           </label>
+
+          <div class="avatar-relation-panel">
+            <div>
+              <strong id="relationName">未选择联系人</strong>
+              <span id="relationSubtitle">关系图谱画像会显示在这里</span>
+            </div>
+            <p id="permissionSummary">--</p>
+            <p id="dyadicSummary">--</p>
+          </div>
 
           <div class="field-grid">
             <label>
@@ -76,8 +85,8 @@
           </div>
 
           <label>
-            <span>对方输入</span>
-            <textarea id="scenario" rows="7" placeholder="输入对方发来的话。第一阶段是文字输入；第二阶段会换成麦克风 + 摄像头。"></textarea>
+            <span>对方刚说的话</span>
+            <textarea id="scenario" rows="7" placeholder="输入对方发来的最后一条消息。后续麦克风/摄像头输入也会先转成这个关系图谱上下文。"></textarea>
           </label>
 
           <label>
@@ -111,16 +120,17 @@
               </div>
               <span class="risk risk-idle" id="jobBadge">--</span>
             </div>
+            <img id="avatarLiveStream" class="avatar-live-stream" alt="数字人永续 idle live stream" hidden />
             <audio id="avatarAudio" controls hidden></audio>
             <video id="avatarVideo" class="avatar-video" controls playsinline hidden></video>
-            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本和渲染状态会出现在这里。</pre>
+            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本、关系依据和渲染状态会出现在这里。</pre>
           </section>
 
           <section class="avatar-card">
             <div class="avatar-section-head">
               <div>
                 <h2>最近任务</h2>
-                <p>记录本地生成任务，方便排查 TTS / LivePortrait 链路。</p>
+                <p>记录本地生成任务，方便排查 TTS / MuseTalk 链路。</p>
               </div>
             </div>
             <div class="avatar-jobs" id="jobsList"></div>

@@ -10,6 +10,7 @@ SelfCore
   generated_at
   source_manifest
   identity_thesis
+  identity_facts[]
   worldview[]
   lifeview[]
   values[]
@@ -33,6 +34,27 @@ SelfCore
 - `statement`
 - `confidence`
 - `notes`
+
+### `identity_facts[]`
+
+稳定身份事实。用于约束数字我可以或不可以认领的能力、偏好、生活约束、角色身份和承诺边界。
+
+落点：
+- `runtime/self-core/identity-facts/facts.jsonl`
+- `runtime/self-core/identity-facts/corrections.jsonl`
+- `runtime/self-core/identity-facts/candidates.jsonl`
+
+字段：
+- `id`
+- `fact_type`
+- `polarity`
+- `statement`
+- `runtime_rule`
+- `confidence`
+- `source_type`
+- `evidence_refs`
+- `confirmed_by_user`
+- `status`
 
 ### `worldview[]`
 

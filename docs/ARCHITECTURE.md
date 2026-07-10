@@ -17,7 +17,7 @@
 ## 核心原则
 
 1. 项目中心永远是“我”，不是联系人、消息、工具或界面。
-2. `SelfCore` 是数字我的核心慢变量，承载三观、判断方式、表达 DNA 和边界。
+2. `SelfCore` 是数字我的核心慢变量，承载三观、判断方式、表达 DNA、边界和身份事实。
 3. `RelationshipGraph` 和 `CommunicationPolicy` 承载表我：不同人眼里的我不同，因为亲密度、共同经历、表达原则、话题边界和互动风格都不同。
 4. 微信聊天记录、多模态材料、每日新闻、外部事件和用户反馈都只是现实输入，不能未经审计直接改写人格。
 5. 真我对数字我的校对是最高优先级信号，必须能反馈到 `SelfCore`、`RelationshipGraph` 和 `CommunicationPolicy`。
@@ -29,7 +29,7 @@
 ```mermaid
 flowchart TD
   A["现实信息输入层<br/>微信聊天记录 / 多模态材料 / 关系线索 / 外部事件"] --> E["证据与候选层<br/>Episode / Evidence / Candidate / Correction"]
-  E --> B["本我层 SelfCore<br/>三观 / 心智模型 / 判断方式 / 表达 DNA / 边界"]
+  E --> B["本我层 SelfCore<br/>三观 / 心智模型 / 判断方式 / 表达 DNA / 边界 / 身份事实"]
   E --> C["表我层<br/>RelationshipGraph + CommunicationPolicy<br/>关系 / 亲密度 / 对不同人的表达风格 / 权限"]
   D["真我-数字我持续对齐层<br/>每日新闻 / 观点校对 / 回复纠错 / 关系修正"] --> E
   B --> R["数字我运行时"]
@@ -46,7 +46,7 @@ flowchart TD
 
 ### 1. 本我层：SelfCore
 
-本我是真正的数字我核心，存放在 `runtime/self-core/SelfCore.v0.1.md`。
+本我是真正的数字我核心，主文件存放在 `runtime/self-core/SelfCore.v0.1.md`。其中身份事实作为 SelfCore 的结构化子模块，存放在 `runtime/self-core/identity-facts/`。
 
 它回答的是：
 
@@ -55,6 +55,9 @@ flowchart TD
 - 我如何做判断、拆问题、识别激励、看风险和机会
 - 我如何表达：短句、反问、吐槽、判断、追问、边界感
 - 我有哪些反模式：过度判断、焦虑、控制欲、情绪化或误判
+- 我有哪些稳定身份事实：我会什么、不会什么、真实偏好、生活约束、角色身份、禁止自称或禁止承诺的内容。
+
+身份事实属于本我，不属于普通多模态记忆或关系画像。聊天记录、多模态材料和持续交互可以提供身份事实候选，但只有经过用户确认、强证据重复或明确校对后，才能进入 `runtime/self-core/identity-facts/facts.jsonl`。运行时生成必须先读取相关身份事实；如果草稿与高置信身份事实冲突，必须改写、降级或阻止输出。
 
 `SelfCore` 是慢变量。它可以被聊天记录、多模态材料、新闻对齐和用户校对更新，但必须经过候选、合并、确认、备份和注入日志。
 
@@ -170,7 +173,7 @@ flowchart TD
 
 | 层 | 核心对象 | 主要落点 |
 | --- | --- | --- |
-| 本我 | `SelfCore`, `SelfCoreCandidate`, `InjectionLog` | `runtime/self-core/` |
+| 本我 | `SelfCore`, `IdentityFact`, `SelfCoreCandidate`, `InjectionLog` | `runtime/self-core/`, `runtime/self-core/identity-facts/` |
 | 表我 | `Person`, `Relationship`, `Alias`, `DyadicProfile`, `PermissionProfile` | `runtime/relationship-graph/`, `runtime/dyadic-profiles/`, `runtime/communication-policy/` |
 | 现实输入 | `Episode`, `Evidence`, `SourceRef`, `MultimodalCandidate` | `data/generated/`, `runtime/multimodal-memory/` |
 | 真我对齐 | `Correction`, `PreferenceSignal`, `NewsAlignment`, `UpdateProposal` | `data/generated/news-alignment/`, `data/generated/selfcore-candidate-merges/` |

@@ -1,0 +1,20 @@
+{
+  "version": "identity-facts.v0.1",
+  "description": "Stable SelfCore facts about the real user, used as hard constraints for the digital self.",
+  "record": {
+    "id": "string",
+    "created_at": "ISO-8601 datetime",
+    "updated_at": "ISO-8601 datetime or null",
+    "fact_type": "capability | incapability | preference | aversion | habit | role | life_constraint | prohibition | boundary",
+    "polarity": "positive | negative | constraint",
+    "statement": "Chinese natural-language fact",
+    "runtime_rule": "Chinese natural-language generation constraint",
+    "confidence": "low | medium | high",
+    "source_type": "user_correction | chat_extraction | multimodal_confirmation | repeated_evidence | manual_entry",
+    "evidence_refs": ["string"],
+    "confirmed_by_user": "boolean",
+    "status": "active | superseded | rejected",
+    "supersedes": ["string"],
+    "notes": "string"
+  }
+}
