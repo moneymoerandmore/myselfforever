@@ -3,6 +3,7 @@ data/raw/
 data/generated/
 outputs/
 artifacts/
+runtime/avatar-layer/config.local.json
 
 # Large derived chat data
 *.jsonl

@@ -35,6 +35,25 @@ let currentStreamWorkerUrl = "";
 let currentSyncSessionId = "";
 let syncPlaybackTimer = null;
 let syncObjectUrl = "";
+let realtimeAnimationTimer = null;
+let realtimeSpeaking = false;
+let realtimeMouthLevel = 0;
+let realtimeChunkAudios = [];
+
+const realtimeFaceRig = {
+  focusX: 0.345,
+  focusY: 0.55,
+  zoom: 2.05,
+  mouthX: 0.345,
+  mouthY: 0.525,
+  mouthWidth: 0.034,
+};
+
+const realtimePortrait = new Image();
+realtimePortrait.src = `/api/avatar/portrait?t=${Date.now()}`;
+realtimePortrait.onload = () => {
+  if (!avatarSyncCanvas.hidden) drawRealtimeAvatar();
+};
 
 function setHealth(ok, text) {
   healthStatus.textContent = text;
@@ -205,9 +224,10 @@ function renderProviderStatus(status) {
   const streamReady = Boolean(status.stream?.configured && status.stream?.worker?.ok && status.stream?.idle_stream_url);
   currentStreamWorkerUrl = status.stream?.worker_url || "";
   const ttsReady = Boolean(status.tts?.configured);
-  const rendererReady = Boolean(baseReady || status.renderer?.configured);
   const lipsyncReady = Boolean(status.lipsync?.configured);
-  const allReady = sourceReady && streamReady && ttsReady && rendererReady && lipsyncReady;
+  const speechReady = "speechSynthesis" in window;
+  const realtimeReady = sourceReady && speechReady;
+  const allReady = realtimeReady;
   providerBadge.textContent = allReady ? "ready" : "missing";
   providerBadge.className = `mode-badge ${allReady ? "mode-ok" : "mode-warn"}`;
   providerSummary.textContent = allReady
@@ -223,11 +243,12 @@ function renderProviderStatus(status) {
   }
   providerGrid.innerHTML = "";
   providerGrid.append(
+    providerItem("Realtime lane", realtimeReady, speechReady ? "browser speech + lightweight mouth motion" : "browser speech unavailable"),
     providerItem("Portrait", sourceReady, sourceReady ? status.source_image.path : "set DIGITAL_TWIN_AVATAR_IMAGE"),
-    providerItem("Live stream", streamReady, streamReady ? status.stream.idle_stream_url : "start avatar stream worker on :8813"),
-    providerItem("Base video", baseReady, baseReady ? "cached base video enabled" : "will render with LivePortrait"),
-    providerItem("TTS", ttsReady, status.tts?.worker_url ? workerText(status.tts.worker) : "command mode"),
-    providerItem("LipSync", lipsyncReady, status.lipsync?.worker_url ? workerText(status.lipsync.worker) : "command mode"),
+    providerItem("Idle stream", streamReady, streamReady ? status.stream.idle_stream_url : "optional idle surface"),
+    providerItem("Fidelity base", baseReady, baseReady ? "cached base video enabled" : "optional offline render"),
+    providerItem("Fidelity TTS", ttsReady, status.tts?.worker_url ? workerText(status.tts.worker) : "optional command mode"),
+    providerItem("Fidelity LipSync", lipsyncReady, status.lipsync?.worker_url ? workerText(status.lipsync.worker) : "optional command mode"),
   );
 }
 
@@ -239,6 +260,280 @@ function stopSynchronizedPlayback() {
   syncObjectUrl = "";
   avatarSyncCanvas.hidden = true;
   avatarLiveStream.hidden = !avatarLiveStream.src;
+  avatarAudio.hidden = true;
+  avatarVideo.hidden = true;
+}
+
+function stopRealtimePlayback() {
+  if (realtimeAnimationTimer) clearTimeout(realtimeAnimationTimer);
+  realtimeAnimationTimer = null;
+  realtimeSpeaking = false;
+  realtimeMouthLevel = 0;
+  avatarAudio.pause();
+  realtimeChunkAudios.forEach((audio) => audio.pause());
+  realtimeChunkAudios = [];
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function realtimePortraitGeometry(width, height) {
+  const baseScale = Math.max(width / realtimePortrait.naturalWidth, height / realtimePortrait.naturalHeight);
+  const scale = baseScale * realtimeFaceRig.zoom;
+  const drawWidth = realtimePortrait.naturalWidth * scale;
+  const drawHeight = realtimePortrait.naturalHeight * scale;
+  const drawX = width / 2 - realtimeFaceRig.focusX * drawWidth;
+  const drawY = height / 2 - realtimeFaceRig.focusY * drawHeight;
+  return { drawX, drawY, drawWidth, drawHeight };
+}
+
+function portraitPoint(geometry, imageX, imageY) {
+  return {
+    x: geometry.drawX + imageX * geometry.drawWidth,
+    y: geometry.drawY + imageY * geometry.drawHeight,
+  };
+}
+
+function drawRealtimeMouth(context, x, y, width, openness) {
+  const open = Math.max(0, Math.min(1, openness));
+  const mouthWidth = width;
+  const mouthHeight = 2 + open * 14;
+  const smile = 3 + open * 2;
+  const cornerLift = 1.5 - open * 1.2;
+
+  context.save();
+  context.globalAlpha = 0.2;
+  context.fillStyle = "rgba(84, 42, 35, 0.34)";
+  context.beginPath();
+  context.ellipse(x, y + 5, mouthWidth * 0.45, mouthHeight * 0.42 + 5, 0, 0, Math.PI * 2);
+  context.fill();
+
+  context.globalAlpha = 0.8;
+  context.fillStyle = `rgba(35, 14, 16, ${0.25 + open * 0.35})`;
+  context.beginPath();
+  context.moveTo(x - mouthWidth / 2, y + cornerLift);
+  context.bezierCurveTo(x - mouthWidth * 0.25, y - mouthHeight * 0.42, x + mouthWidth * 0.25, y - mouthHeight * 0.42, x + mouthWidth / 2, y + cornerLift);
+  context.bezierCurveTo(x + mouthWidth * 0.3, y + mouthHeight * 0.62, x - mouthWidth * 0.3, y + mouthHeight * 0.62, x - mouthWidth / 2, y + cornerLift);
+  context.closePath();
+  context.fill();
+
+  context.strokeStyle = "rgba(96, 45, 43, 0.9)";
+  context.lineWidth = 3;
+  context.lineCap = "round";
+  context.beginPath();
+  context.moveTo(x - mouthWidth / 2, y + cornerLift);
+  context.bezierCurveTo(x - mouthWidth * 0.23, y - smile, x + mouthWidth * 0.23, y - smile, x + mouthWidth / 2, y + cornerLift);
+  context.stroke();
+
+  context.strokeStyle = "rgba(210, 132, 118, 0.38)";
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(x - mouthWidth * 0.38, y - 3);
+  context.bezierCurveTo(x - mouthWidth * 0.12, y - 8, x + mouthWidth * 0.12, y - 8, x + mouthWidth * 0.38, y - 3);
+  context.stroke();
+
+  if (open > 0.55) {
+    context.globalAlpha = 0.18 * open;
+    context.fillStyle = "rgba(235, 220, 205, 0.85)";
+    context.fillRect(x - mouthWidth * 0.25, y - mouthHeight * 0.12, mouthWidth * 0.5, Math.max(1.5, mouthHeight * 0.08));
+  }
+  context.restore();
+}
+
+function drawRealtimeAvatar() {
+  const canvas = avatarSyncCanvas;
+  const context = canvas.getContext("2d");
+  const width = 960;
+  const height = 540;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.fillStyle = "#101418";
+  context.fillRect(0, 0, width, height);
+
+  let mouthPoint = { x: width / 2, y: height * 0.58 };
+  let mouthWidth = 68;
+  if (realtimePortrait.complete && realtimePortrait.naturalWidth) {
+    const geometry = realtimePortraitGeometry(width, height);
+    context.drawImage(realtimePortrait, geometry.drawX, geometry.drawY, geometry.drawWidth, geometry.drawHeight);
+    mouthPoint = portraitPoint(geometry, realtimeFaceRig.mouthX, realtimeFaceRig.mouthY);
+    mouthWidth = geometry.drawWidth * realtimeFaceRig.mouthWidth;
+
+    const jawOpen = realtimeSpeaking ? realtimeMouthLevel : 0;
+    context.save();
+    context.beginPath();
+    context.ellipse(mouthPoint.x, mouthPoint.y + 23, mouthWidth * 1.15, 38, 0, 0, Math.PI * 2);
+    context.clip();
+    context.globalAlpha = 0.22 * jawOpen;
+    context.drawImage(realtimePortrait, geometry.drawX, geometry.drawY + jawOpen * 7, geometry.drawWidth, geometry.drawHeight);
+    context.restore();
+  }
+
+  const pulse = realtimeSpeaking ? 0.18 + realtimeMouthLevel * 0.82 : 0.03;
+  drawRealtimeMouth(context, mouthPoint.x, mouthPoint.y, mouthWidth, pulse);
+
+  if (realtimeSpeaking) {
+    realtimeMouthLevel = realtimeMouthLevel * 0.35 + Math.random() * 0.65;
+    realtimeAnimationTimer = setTimeout(drawRealtimeAvatar, 70);
+  }
+}
+
+function withCacheBust(url) {
+  const cacheJoiner = url.includes("?") ? "&" : "?";
+  return `${url}${cacheJoiner}t=${Date.now()}`;
+}
+
+function playRealtimeAudioElement(audio, syncSessionId = "") {
+  return new Promise((resolve, reject) => {
+    let syncStopped = false;
+    const stopSync = () => {
+      syncStopped = true;
+      if (syncPlaybackTimer) clearTimeout(syncPlaybackTimer);
+      syncPlaybackTimer = null;
+    };
+    const tickSyncFrame = async () => {
+      if (syncStopped || !syncSessionId || !currentStreamWorkerUrl) return;
+      try {
+        await drawSyncFrame(syncSessionId, audio.currentTime * 1000);
+      } catch {
+        // The next poll usually catches up while MuseTalk is still pushing frames.
+      }
+      if (!syncStopped && !audio.ended) syncPlaybackTimer = setTimeout(tickSyncFrame, 40);
+    };
+    audio.onplay = () => {
+      realtimeSpeaking = true;
+      if (syncSessionId && currentStreamWorkerUrl) {
+        currentSyncSessionId = syncSessionId;
+        avatarSyncCanvas.hidden = false;
+        avatarLiveStream.hidden = true;
+        tickSyncFrame();
+      } else {
+        drawRealtimeAvatar();
+      }
+    };
+    audio.onended = () => {
+      stopSync();
+      resolve();
+    };
+    audio.onerror = () => {
+      stopSync();
+      reject(new Error("clone voice chunk failed"));
+    };
+    const start = async () => {
+      if (syncSessionId && currentStreamWorkerUrl) {
+        avatarSyncCanvas.hidden = false;
+        avatarLiveStream.hidden = true;
+        await waitForSyncBuffer(syncSessionId, 1, 2600);
+        await drawSyncFrame(syncSessionId, 0).catch(() => {});
+      }
+      await audio.play();
+    };
+    start().catch((error) => {
+      stopSync();
+      reject(error);
+    });
+  });
+}
+
+async function playRealtimeAudioChunks(text, audioChunks) {
+  const chunks = audioChunks.filter((chunk) => chunk?.audio_url);
+  realtimeChunkAudios = chunks.map((chunk) => {
+    const audio = new Audio(withCacheBust(chunk.audio_url));
+    audio.preload = "auto";
+    return audio;
+  });
+  if (realtimeChunkAudios[1]) realtimeChunkAudios[1].load();
+  for (let index = 0; index < realtimeChunkAudios.length; index += 1) {
+    const nextAudio = realtimeChunkAudios[index + 1];
+    if (nextAudio) nextAudio.load();
+    await playRealtimeAudioElement(realtimeChunkAudios[index], chunks[index]?.visual_session_id || "");
+  }
+  currentSyncSessionId = "";
+  realtimeSpeaking = false;
+  if (!chunks.some((chunk) => chunk?.visual_session_id)) drawRealtimeAvatar();
+}
+
+async function speakRealtimeText(text, audioUrl = "", audioChunks = [], visualDriver = {}) {
+  stopRealtimePlayback();
+  const normalizedVisualDriver = typeof visualDriver === "string" ? { stream_url: visualDriver } : (visualDriver || {});
+  const visualStreamUrl = normalizedVisualDriver.stream_url || "";
+  const syncEnabled = Boolean(
+    normalizedVisualDriver.sync_mode === "per_audio_chunk"
+      && (normalizedVisualDriver.stream_worker_url || currentStreamWorkerUrl)
+      && audioChunks.some((chunk) => chunk?.visual_session_id),
+  );
+  if (normalizedVisualDriver.stream_worker_url) currentStreamWorkerUrl = normalizedVisualDriver.stream_worker_url;
+  avatarSyncCanvas.hidden = !syncEnabled && Boolean(visualStreamUrl);
+  avatarLiveStream.hidden = syncEnabled || !visualStreamUrl;
+  if (!syncEnabled && visualStreamUrl) avatarLiveStream.src = withCacheBust(visualStreamUrl);
+  avatarVideo.hidden = true;
+  avatarAudio.hidden = true;
+  avatarAudio.controls = false;
+  realtimeSpeaking = true;
+  realtimeMouthLevel = 0.35;
+  if (!visualStreamUrl && !syncEnabled) drawRealtimeAvatar();
+
+  if (audioChunks.length) {
+    try {
+      await playRealtimeAudioChunks(text, audioChunks);
+      return;
+    } catch {
+      setHealth(false, "clone voice stream failed; falling back to browser speech");
+      speakRealtimeText(text);
+      return;
+    }
+  }
+
+  if (audioUrl) {
+    avatarAudio.src = withCacheBust(audioUrl);
+    avatarAudio.onplay = () => {
+      realtimeSpeaking = true;
+      if (!syncEnabled) drawRealtimeAvatar();
+    };
+    avatarAudio.onended = () => {
+      realtimeSpeaking = false;
+      if (!syncEnabled) drawRealtimeAvatar();
+    };
+    avatarAudio.onerror = () => {
+      setHealth(false, "clone voice failed; falling back to browser speech");
+      speakRealtimeText(text);
+    };
+    try {
+      await avatarAudio.play();
+      return;
+    } catch {
+      setHealth(false, "Clone voice is ready. Click the avatar once to allow playback.");
+      return;
+    }
+  }
+
+  if (!("speechSynthesis" in window)) {
+    setTimeout(() => {
+      realtimeSpeaking = false;
+      if (!visualStreamUrl) drawRealtimeAvatar();
+    }, Math.max(900, text.length * 150));
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+  utterance.rate = 1.18;
+  utterance.pitch = 1.0;
+  const voices = window.speechSynthesis.getVoices();
+  const zhVoice = voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
+  if (zhVoice) utterance.voice = zhVoice;
+  utterance.onboundary = () => {
+    realtimeMouthLevel = Math.random();
+  };
+  utterance.onend = () => {
+    realtimeSpeaking = false;
+    if (!visualStreamUrl && !syncEnabled) drawRealtimeAvatar();
+  };
+  utterance.onerror = () => {
+    realtimeSpeaking = false;
+    if (!visualStreamUrl && !syncEnabled) drawRealtimeAvatar();
+  };
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
 }
 
 async function syncStatus(sessionId) {
@@ -284,7 +579,8 @@ async function startSynchronizedPlayback(job) {
   if (syncPlaybackTimer) clearTimeout(syncPlaybackTimer);
   avatarSyncCanvas.hidden = false;
   avatarLiveStream.hidden = true;
-  avatarAudio.hidden = false;
+  avatarAudio.hidden = true;
+  avatarAudio.controls = false;
   avatarAudio.src = `${job.files.audio}?t=${Date.now()}`;
 
   const buffered = await waitForSyncBuffer(sessionId);
@@ -302,7 +598,7 @@ async function startSynchronizedPlayback(job) {
       try {
         await avatarAudio.play();
       } catch {
-        setHealth(false, "Audio is ready. Press play once to allow synchronized playback.");
+        setHealth(false, "Audio is ready. Click the avatar once to continue unified playback.");
       }
     }
     if (avatarAudio.ended) {
@@ -316,9 +612,19 @@ async function startSynchronizedPlayback(job) {
     await drawSyncFrame(sessionId, 0);
     await avatarAudio.play();
   } catch {
-    setHealth(false, "Audio is ready. Press play once to allow synchronized playback.");
+    setHealth(false, "Audio is ready. Click the avatar once to continue unified playback.");
   }
   tick();
+}
+
+async function resumeUnifiedPlayback() {
+  if (!avatarAudio.src || !avatarAudio.paused || avatarAudio.ended) return;
+  try {
+    await avatarAudio.play();
+    setHealth(true, "unified avatar playback resumed");
+  } catch (error) {
+    setHealth(false, error.message);
+  }
 }
 
 async function loadProviderStatus() {
@@ -394,19 +700,14 @@ function renderJob(job) {
   ]
     .filter(Boolean)
     .join("\n");
-  if (job.files?.video) {
+  if (job.files?.audio && (job.status === "lipsyncing" || job.status === "completed")) {
+    startSynchronizedPlayback(job).catch((error) => setHealth(false, error.message));
+  } else if (job.files?.video && !currentSyncSessionId) {
     avatarVideo.hidden = false;
     avatarVideo.src = `${job.files.video}?t=${Date.now()}`;
   } else {
     avatarVideo.hidden = true;
     avatarVideo.removeAttribute("src");
-  }
-  if (job.files?.audio && terminalJobStatus(job.status)) {
-    avatarAudio.hidden = false;
-    avatarAudio.src = `${job.files.audio}?t=${Date.now()}`;
-  }
-  if (job.files?.audio && (job.status === "lipsyncing" || job.status === "completed")) {
-    startSynchronizedPlayback(job).catch((error) => setHealth(false, error.message));
   }
 }
 
@@ -441,6 +742,7 @@ function resetPlayback() {
   if (activeJobTimer) clearInterval(activeJobTimer);
   activeJobTimer = null;
   activeJobId = null;
+  stopRealtimePlayback();
   stopSynchronizedPlayback();
   avatarAudio.pause();
   avatarAudio.hidden = true;
@@ -472,11 +774,11 @@ async function renderAvatarReply() {
   cacheSettings();
   resetPlayback();
   renderButton.disabled = true;
-  renderButton.textContent = "Generating...";
-  replyText.textContent = "Starting relationship-graph avatar job. Speaking output will be published back into the live stream when ready.";
+  renderButton.textContent = "Thinking...";
+  replyText.textContent = "Realtime lane: relationship graph drafts first; speech and mouth motion run locally without IndexTTS2/MuseTalk blocking.";
   setBadge(jobBadge, "running");
   try {
-    const response = await fetch("/api/avatar/reply", {
+    const response = await fetch("/api/avatar/realtime-reply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -494,10 +796,28 @@ async function renderAvatarReply() {
       }),
     });
     const data = await response.json();
-    if (!data.ok) throw new Error(data.error || "avatar generation failed");
+    if (!data.ok) throw new Error(data.error || "realtime avatar generation failed");
     renderJob(data.result);
-    startAvatarJobPolling(data.result.id);
-    setHealth(true, "relationship graph avatar job started");
+    const cloneVoice = data.result.clone_voice || {};
+    const visualDriver = cloneVoice.visual_driver || {};
+    speakRealtimeText(
+      data.result.draft_text || "",
+      cloneVoice.audio_url || "",
+      cloneVoice.audio_chunks || [],
+      visualDriver.enabled ? visualDriver : {},
+    );
+    renderButton.disabled = false;
+    renderButton.textContent = "生成数字人回复";
+    const voiceStatus = cloneVoice.status || "";
+    const voiceHealth =
+      visualDriver.enabled
+        ? "MuseTalk visual stream + cloned voice started"
+        : voiceStatus === "streaming"
+          ? ((cloneVoice.audio_chunks || []).length > 1 ? "chunked clone voice stream started" : "streaming clone voice started")
+        : voiceStatus === "cached"
+          ? "clone voice reply started"
+          : "clone voice warming; browser voice used now";
+    setHealth(true, voiceHealth);
   } catch (error) {
     replyText.textContent = `generation failed: ${error.message}`;
     jobSummary.textContent = "job failed";
@@ -523,6 +843,8 @@ poeModelInput.addEventListener("change", cacheSettings);
 refreshButton.addEventListener("click", refreshAll);
 renderButton.addEventListener("click", renderAvatarReply);
 personSelect.addEventListener("change", renderRelationProfile);
+avatarSyncCanvas.addEventListener("click", resumeUnifiedPlayback);
+avatarLiveStream.addEventListener("click", resumeUnifiedPlayback);
 
 restoreSettings();
 Promise.all([loadPeople(), refreshAll()]).catch((error) => setHealth(false, error.message));

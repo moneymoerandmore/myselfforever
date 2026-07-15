@@ -193,6 +193,10 @@ class MuseTalkWorker:
 
         self.torch = torch
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
         load_started = time.time()
         self.vae, self.unet, self.pe = load_all_model(
             unet_model_path=str(self.repo / "models" / "musetalkV15" / "unet.pth"),
@@ -465,7 +469,7 @@ class MuseTalkWorker:
                         bbox = avatar["coords"][frame_index % len(avatar["coords"])]
                         if bbox == coord_placeholder:
                             continue
-                        ori_frame = copy.deepcopy(avatar["frames"][frame_index % len(avatar["frames"])])
+                        ori_frame = avatar["frames"][frame_index % len(avatar["frames"])].copy()
                         x1, y1, x2, y2 = bbox
                         try:
                             res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
@@ -474,7 +478,8 @@ class MuseTalkWorker:
                         mask = avatar["masks"][frame_index % len(avatar["masks"])]
                         mask_crop_box = avatar["mask_coords"][frame_index % len(avatar["mask_coords"])]
                         combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-                        cv2.imwrite(str(frame_dir / f"{frame_index:08d}.png"), combine_frame)
+                        if not skip_video:
+                            cv2.imwrite(str(frame_dir / f"{frame_index:08d}.png"), combine_frame)
                         if stream_worker_url:
                             push_started = time.time()
                             try:

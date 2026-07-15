@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import csv
 from datetime import date
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
+import gzip
+import hashlib
 import html
 import importlib.util
 import json
@@ -17,6 +20,9 @@ import math
 import mimetypes
 import os
 import re
+import secrets
+import socket
+import ssl
 import shutil
 import subprocess
 import sys
@@ -58,6 +64,9 @@ SELFCORE_INJECTION_LOG_PATH = ROOT / "runtime" / "self-core" / "candidate-inject
 AVATAR_LAYER_DIR = ROOT / "data" / "generated" / "avatar-layer"
 AVATAR_ASSET_DIR = ROOT / "runtime" / "avatar-layer"
 AVATAR_CONFIG_PATH = AVATAR_ASSET_DIR / "config.json"
+AVATAR_LOCAL_CONFIG_PATH = AVATAR_ASSET_DIR / "config.local.json"
+AVATAR_VOICE_CACHE_DIR = AVATAR_LAYER_DIR / "_voice-cache"
+AVATAR_REALTIME_AUDIO_CACHE_DIR = AVATAR_LAYER_DIR / "_realtime-audio-cache"
 MAX_MULTIMODAL_FILES = 36
 MAX_IMAGE_DATA_URL_CHARS = 900_000
 MAX_TOTAL_DATA_URL_CHARS = 8_000_000
@@ -69,6 +78,10 @@ asr_jobs: dict[str, dict[str, Any]] = {}
 asr_jobs_lock = threading.Lock()
 asr_job_executor = ThreadPoolExecutor(max_workers=1)
 avatar_job_executor = ThreadPoolExecutor(max_workers=1)
+avatar_visual_executor = ThreadPoolExecutor(max_workers=1)
+avatar_voice_cache_executor = ThreadPoolExecutor(max_workers=1)
+avatar_voice_cache_pending: set[str] = set()
+avatar_voice_cache_lock = threading.Lock()
 TOPIC_LABELS = {
     "ai_technology": "AI与技术",
     "work_organization": "工作与组织",
@@ -637,8 +650,13 @@ def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
             result["no_reply"] = True
             result["tone_basis"] = "poe_model_chose_no_reply"
             return result
-        segments = normalize_chat_style(model_text)
+        if latency_profile == "fast_avatar":
+            segments = normalize_chat_style(model_text, max_segments=1, max_chars=12)
+        else:
+            segments = normalize_chat_style(model_text)
         segments, personality_guard_notes = enforce_personality_fact_boundaries(segments)
+        if latency_profile == "fast_avatar":
+            segments = compact_fast_avatar_segments(segments)
         if personality_guard_notes:
             result["personality_guard"] = {
                 "status": "rewritten",
@@ -721,27 +739,47 @@ def apply_trusted_group_risk(result: dict[str, Any]) -> None:
 
 def avatar_env_config() -> dict[str, str]:
     file_config: dict[str, str] = {}
-    if AVATAR_CONFIG_PATH.exists():
+    config_keys = {
+        "source_image_path",
+        "base_video_path",
+        "tts_command",
+        "tts_worker_url",
+        "stream_worker_url",
+        "realtime_voice_provider",
+        "elevenlabs_api_key",
+        "elevenlabs_voice_id",
+        "elevenlabs_model_id",
+        "volcengine_api_key",
+        "volcengine_app_id",
+        "volcengine_token",
+        "volcengine_cluster",
+        "volcengine_voice_type",
+        "volcengine_model",
+        "volcengine_endpoint",
+        "volcengine_ws_endpoint",
+        "volcengine_stream_transport",
+        "volcengine_encoding",
+        "liveportrait_command",
+        "lipsync_command",
+        "lipsync_worker_url",
+        "lipsync_mode",
+        "lipsync_fps",
+        "lipsync_batch_size",
+        "lipsync_skip_video",
+        "realtime_avatar_id",
+    }
+    for config_path in (AVATAR_CONFIG_PATH, AVATAR_LOCAL_CONFIG_PATH):
+        if not config_path.exists():
+            continue
         try:
-            payload = json.loads(AVATAR_CONFIG_PATH.read_text(encoding="utf-8"))
+            payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
             if isinstance(payload, dict):
-                file_config = {
-                    "source_image_path": str(payload.get("source_image_path") or "").strip(),
-                    "base_video_path": str(payload.get("base_video_path") or "").strip(),
-                    "tts_command": str(payload.get("tts_command") or "").strip(),
-                    "tts_worker_url": str(payload.get("tts_worker_url") or "").strip(),
-                    "stream_worker_url": str(payload.get("stream_worker_url") or "").strip(),
-                    "liveportrait_command": str(payload.get("liveportrait_command") or "").strip(),
-                    "lipsync_command": str(payload.get("lipsync_command") or "").strip(),
-                    "lipsync_worker_url": str(payload.get("lipsync_worker_url") or "").strip(),
-                    "lipsync_mode": str(payload.get("lipsync_mode") or "").strip(),
-                    "lipsync_fps": str(payload.get("lipsync_fps") or "").strip(),
-                    "lipsync_batch_size": str(payload.get("lipsync_batch_size") or "").strip(),
-                    "lipsync_skip_video": str(payload.get("lipsync_skip_video") or "").strip(),
-                    "realtime_avatar_id": str(payload.get("realtime_avatar_id") or "").strip(),
-                }
+                for key in config_keys:
+                    value = str(payload.get(key) or "").strip()
+                    if value:
+                        file_config[key] = value
         except (OSError, json.JSONDecodeError):
-            file_config = {}
+            continue
     return {
         "source_image_path": os.environ.get("DIGITAL_TWIN_AVATAR_IMAGE", "").strip()
         or file_config.get("source_image_path", ""),
@@ -753,6 +791,34 @@ def avatar_env_config() -> dict[str, str]:
         or file_config.get("tts_worker_url", ""),
         "stream_worker_url": os.environ.get("AVATAR_STREAM_WORKER_URL", "").strip()
         or file_config.get("stream_worker_url", ""),
+        "realtime_voice_provider": os.environ.get("AVATAR_REALTIME_VOICE_PROVIDER", "").strip()
+        or file_config.get("realtime_voice_provider", "elevenlabs"),
+        "elevenlabs_api_key": os.environ.get("ELEVENLABS_API_KEY", "").strip()
+        or file_config.get("elevenlabs_api_key", ""),
+        "elevenlabs_voice_id": os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+        or file_config.get("elevenlabs_voice_id", ""),
+        "elevenlabs_model_id": os.environ.get("ELEVENLABS_MODEL_ID", "").strip()
+        or file_config.get("elevenlabs_model_id", "eleven_flash_v2_5"),
+        "volcengine_api_key": os.environ.get("VOLCENGINE_API_KEY", "").strip()
+        or file_config.get("volcengine_api_key", ""),
+        "volcengine_app_id": os.environ.get("VOLCENGINE_TTS_APP_ID", "").strip()
+        or file_config.get("volcengine_app_id", ""),
+        "volcengine_token": os.environ.get("VOLCENGINE_TTS_TOKEN", "").strip()
+        or file_config.get("volcengine_token", ""),
+        "volcengine_cluster": os.environ.get("VOLCENGINE_TTS_CLUSTER", "").strip()
+        or file_config.get("volcengine_cluster", ""),
+        "volcengine_voice_type": os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "").strip()
+        or file_config.get("volcengine_voice_type", ""),
+        "volcengine_model": os.environ.get("VOLCENGINE_TTS_MODEL", "").strip()
+        or file_config.get("volcengine_model", ""),
+        "volcengine_endpoint": os.environ.get("VOLCENGINE_TTS_ENDPOINT", "").strip()
+        or file_config.get("volcengine_endpoint", ""),
+        "volcengine_ws_endpoint": os.environ.get("VOLCENGINE_TTS_WS_ENDPOINT", "").strip()
+        or file_config.get("volcengine_ws_endpoint", "wss://openspeech.bytedance.com/api/v1/tts/ws_binary"),
+        "volcengine_stream_transport": os.environ.get("VOLCENGINE_TTS_STREAM_TRANSPORT", "").strip()
+        or file_config.get("volcengine_stream_transport", "websocket"),
+        "volcengine_encoding": os.environ.get("VOLCENGINE_TTS_ENCODING", "").strip()
+        or file_config.get("volcengine_encoding", "mp3"),
         "liveportrait_command": os.environ.get("LIVEPORTRAIT_RENDER_COMMAND", "").strip()
         or file_config.get("liveportrait_command", ""),
         "lipsync_command": os.environ.get("AVATAR_LIPSYNC_COMMAND", "").strip()
@@ -762,7 +828,7 @@ def avatar_env_config() -> dict[str, str]:
         "lipsync_mode": os.environ.get("AVATAR_LIPSYNC_MODE", "").strip()
         or file_config.get("lipsync_mode", ""),
         "lipsync_fps": os.environ.get("AVATAR_LIPSYNC_FPS", "").strip()
-        or file_config.get("lipsync_fps", "12"),
+        or file_config.get("lipsync_fps", "8"),
         "lipsync_batch_size": os.environ.get("AVATAR_LIPSYNC_BATCH_SIZE", "").strip()
         or file_config.get("lipsync_batch_size", "8"),
         "lipsync_skip_video": os.environ.get("AVATAR_LIPSYNC_SKIP_VIDEO", "").strip()
@@ -803,6 +869,23 @@ def avatar_layer_status() -> dict[str, Any]:
             else "",
             "mode": "mjpeg_idle_live",
             "env": "AVATAR_STREAM_WORKER_URL",
+        },
+        "realtime_voice": {
+            "provider": config["realtime_voice_provider"],
+            "configured": avatar_realtime_voice_configured(config),
+            "model_id": config["elevenlabs_model_id"]
+            if config["realtime_voice_provider"] == "elevenlabs"
+            else config["volcengine_model"],
+            "voice_id_configured": bool(config["elevenlabs_voice_id"])
+            if config["realtime_voice_provider"] == "elevenlabs"
+            else bool(config["volcengine_voice_type"]),
+            "api_key_configured": bool(config["elevenlabs_api_key"])
+            if config["realtime_voice_provider"] == "elevenlabs"
+            else bool(config["volcengine_api_key"] or config["volcengine_token"]),
+            "credential_mode": "ark_api_key"
+            if config["volcengine_api_key"]
+            else ("openspeech_token" if config["volcengine_token"] else ""),
+            "env": "AVATAR_REALTIME_VOICE_PROVIDER / ELEVENLABS_* / VOLCENGINE_*",
         },
         "tts": {
             "configured": bool(config["tts_command"] or config["tts_worker_url"]),
@@ -957,6 +1040,27 @@ def avatar_worker_url(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + "/" + path.lstrip("/")
 
 
+def avatar_realtime_voice_configured(config: dict[str, str]) -> bool:
+    provider = config.get("realtime_voice_provider")
+    if provider == "volcengine":
+        return bool(
+            (
+                config.get("volcengine_api_key")
+                or (
+                    config.get("volcengine_app_id")
+                    and config.get("volcengine_token")
+                    and config.get("volcengine_cluster")
+                )
+            )
+            and config.get("volcengine_voice_type")
+        )
+    return bool(
+        provider == "elevenlabs"
+        and config.get("elevenlabs_api_key")
+        and config.get("elevenlabs_voice_id")
+    )
+
+
 def probe_avatar_worker(base_url: str) -> dict[str, Any]:
     if not base_url:
         return {"configured": False, "ok": False}
@@ -1028,9 +1132,9 @@ def call_lipsync_worker(
 ) -> dict[str, Any]:
     mode = (config.get("lipsync_mode") or "").strip().lower()
     try:
-        fps = int(config.get("lipsync_fps") or 12)
+        fps = int(config.get("lipsync_fps") or 8)
     except (TypeError, ValueError):
-        fps = 12
+        fps = 8
     try:
         batch_size = int(config.get("lipsync_batch_size") or 8)
     except (TypeError, ValueError):
@@ -1152,6 +1256,436 @@ def run_tts_step(
         result["worker_error"] = str(exc)
     result["name"] = step_name
     return result
+
+
+def avatar_voice_cache_key(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def avatar_voice_cache_paths(cache_key: str) -> dict[str, Path]:
+    cache_dir = AVATAR_VOICE_CACHE_DIR / cache_key
+    return {
+        "dir": cache_dir,
+        "text": cache_dir / "reply.txt",
+        "audio": cache_dir / "voice.wav",
+        "meta": cache_dir / "meta.json",
+    }
+
+
+def avatar_voice_cache_file(cache_key: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{24}", cache_key):
+        raise ValueError("invalid voice cache key")
+    paths = avatar_voice_cache_paths(cache_key)
+    audio_path = paths["audio"].resolve()
+    root = AVATAR_VOICE_CACHE_DIR.resolve()
+    if root not in audio_path.parents:
+        raise ValueError("invalid voice cache path")
+    return audio_path
+
+
+def avatar_voice_cache_url(cache_key: str) -> str:
+    return f"/api/avatar/voice-cache/{cache_key}.wav"
+
+
+def avatar_voice_text_chunks(text: str, max_chars: int = 6) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized:
+        return []
+    chunks: list[str] = []
+    current = ""
+    for char in normalized:
+        current += char
+        if char in "。！？!?，,、；; " or len(current) >= max_chars:
+            chunk = current.strip(" ，,、；;")
+            if chunk:
+                chunks.append(chunk)
+            current = ""
+    tail = current.strip(" ，,、；;")
+    if tail:
+        chunks.append(tail)
+    return chunks or [normalized]
+
+
+def avatar_streaming_voice_url(text: str, chunk_index: int | None = None) -> str:
+    url = f"/api/avatar/streaming-voice?text={quote(text)}"
+    if chunk_index is not None:
+        url += f"&chunk={chunk_index}"
+    return url
+
+
+def avatar_realtime_audio_cache_key(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def avatar_realtime_audio_cache_path(cache_key: str, encoding: str = "mp3") -> Path:
+    if not re.fullmatch(r"[0-9a-f]{24}", cache_key):
+        raise ValueError("invalid realtime audio cache key")
+    safe_encoding = re.sub(r"[^a-zA-Z0-9]", "", encoding or "mp3") or "mp3"
+    return AVATAR_REALTIME_AUDIO_CACHE_DIR / f"{cache_key}.{safe_encoding}"
+
+
+def write_avatar_realtime_audio_cache(text: str, audio_bytes: bytes, encoding: str = "mp3") -> str:
+    if not audio_bytes:
+        return ""
+    cache_key = avatar_realtime_audio_cache_key(text)
+    cache_path = avatar_realtime_audio_cache_path(cache_key, encoding)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    temp_path.write_bytes(audio_bytes)
+    temp_path.replace(cache_path)
+    return cache_key
+
+
+def wait_avatar_realtime_audio_cache(text: str, encoding: str = "mp3", timeout_seconds: float = 2.4) -> Path | None:
+    cache_path = avatar_realtime_audio_cache_path(avatar_realtime_audio_cache_key(text), encoding)
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return cache_path
+        time.sleep(0.04)
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path
+    return None
+
+
+def websocket_read_exact(sock: ssl.SSLSocket | socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ConnectionError("websocket connection closed")
+        data += chunk
+    return data
+
+
+class MinimalWebSocketClient:
+    def __init__(self, url: str, headers: dict[str, str] | None = None, timeout: float = 30.0) -> None:
+        self.url = url
+        self.headers = headers or {}
+        self.timeout = timeout
+        self.sock: ssl.SSLSocket | socket.socket | None = None
+
+    def __enter__(self) -> "MinimalWebSocketClient":
+        parsed = urlparse(self.url)
+        secure = parsed.scheme == "wss"
+        port = parsed.port or (443 if secure else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        raw_sock = socket.create_connection((parsed.hostname or "", port), timeout=self.timeout)
+        raw_sock.settimeout(self.timeout)
+        self.sock = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=parsed.hostname) if secure else raw_sock
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        header_lines = [
+            f"GET {path} HTTP/1.1",
+            f"Host: {parsed.hostname}",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {key}",
+            "Sec-WebSocket-Version: 13",
+        ]
+        for name, value in self.headers.items():
+            if value:
+                header_lines.append(f"{name}: {value}")
+        request_bytes = ("\r\n".join(header_lines) + "\r\n\r\n").encode("utf-8")
+        self.sock.sendall(request_bytes)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            response += self.sock.recv(4096)
+            if len(response) > 65536:
+                raise ConnectionError("websocket handshake response too large")
+        status_line = response.split(b"\r\n", 1)[0].decode("latin1", errors="replace")
+        if " 101 " not in status_line:
+            raise ConnectionError(f"websocket handshake failed: {status_line}")
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
+
+    def send_binary(self, payload: bytes) -> None:
+        if not self.sock:
+            raise ConnectionError("websocket is not connected")
+        header = bytearray([0x82])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.extend([0x80 | 126])
+            header.extend(length.to_bytes(2, "big"))
+        else:
+            header.extend([0x80 | 127])
+            header.extend(length.to_bytes(8, "big"))
+        mask = secrets.token_bytes(4)
+        header.extend(mask)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def recv(self) -> tuple[int, bytes]:
+        if not self.sock:
+            raise ConnectionError("websocket is not connected")
+        while True:
+            first, second = websocket_read_exact(self.sock, 2)
+            opcode = first & 0x0F
+            masked = bool(second & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(websocket_read_exact(self.sock, 2), "big")
+            elif length == 127:
+                length = int.from_bytes(websocket_read_exact(self.sock, 8), "big")
+            mask = websocket_read_exact(self.sock, 4) if masked else b""
+            payload = websocket_read_exact(self.sock, length) if length else b""
+            if masked:
+                payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            if opcode == 0x8:
+                raise ConnectionError("websocket closed by server")
+            if opcode == 0x9:
+                continue
+            return opcode, payload
+
+
+def volcengine_ws_request_payload(text: str, config: dict[str, str]) -> bytes:
+    payload = {
+        "app": {
+            "appid": config["volcengine_app_id"],
+            "token": config["volcengine_token"],
+            "cluster": config["volcengine_cluster"],
+        },
+        "user": {"uid": "digital_twin_avatar"},
+        "audio": {
+            "voice_type": config["volcengine_voice_type"],
+            "encoding": config.get("volcengine_encoding") or "mp3",
+            "speed_ratio": 1.0,
+        },
+        "request": {
+            "reqid": f"dtwin-ws-tts-{uuid4().hex}",
+            "text": text,
+            "operation": "submit",
+        },
+    }
+    compressed = gzip.compress(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    header = bytes([0x11, 0x10, 0x11, 0x00])
+    return header + len(compressed).to_bytes(4, "big") + compressed
+
+
+def parse_volcengine_ws_response(frame: bytes) -> dict[str, Any]:
+    if len(frame) < 4:
+        return {"type": "empty"}
+    header_size = (frame[0] & 0x0F) * 4
+    message_type = frame[1] >> 4
+    flags = frame[1] & 0x0F
+    serialization = frame[2] >> 4
+    compression = frame[2] & 0x0F
+    payload = frame[header_size:]
+    sequence: int | None = None
+    if flags in {1, 2, 3} and len(payload) >= 4:
+        sequence = int.from_bytes(payload[:4], "big", signed=True)
+        payload = payload[4:]
+    if len(payload) >= 4:
+        payload_size = int.from_bytes(payload[:4], "big", signed=False)
+        payload = payload[4 : 4 + payload_size]
+    if compression == 1 and payload:
+        try:
+            payload = gzip.decompress(payload)
+        except OSError:
+            pass
+    if message_type == 0xB:
+        return {"type": "audio", "sequence": sequence, "payload": payload, "done": bool(sequence is not None and sequence < 0)}
+    if message_type == 0xF:
+        text = payload.decode("utf-8", errors="replace")
+        return {"type": "error", "sequence": sequence, "payload": payload, "text": text}
+    if serialization == 1:
+        text = payload.decode("utf-8", errors="replace")
+        return {"type": "json", "sequence": sequence, "payload": payload, "text": text}
+    return {"type": "unknown", "sequence": sequence, "payload": payload, "message_type": message_type}
+
+
+def synthesize_volcengine_audio_bytes(text: str, config: dict[str, str]) -> bytes:
+    if not avatar_realtime_voice_configured(config) or config.get("realtime_voice_provider") != "volcengine":
+        raise ValueError("volcengine voice provider is not configured")
+    if config.get("volcengine_api_key"):
+        raise ValueError("volcengine ark audio byte synthesis is not configured for visual driver")
+    endpoint = config.get("volcengine_ws_endpoint") or "wss://openspeech.bytedance.com/api/v1/tts/ws_binary"
+    chunks: list[bytes] = []
+    with MinimalWebSocketClient(endpoint, headers={"Authorization": f"Bearer;{config['volcengine_token']}"}, timeout=30) as ws:
+        ws.send_binary(volcengine_ws_request_payload(text, config))
+        while True:
+            opcode, frame = ws.recv()
+            if opcode != 0x2:
+                continue
+            parsed = parse_volcengine_ws_response(frame)
+            if parsed["type"] == "error":
+                raise ValueError(str(parsed.get("text") or "volcengine websocket error"))
+            payload = parsed.get("payload") or b""
+            if parsed["type"] == "audio" and payload:
+                chunks.append(payload)
+            if parsed.get("done"):
+                break
+    if not chunks:
+        raise ValueError("volcengine websocket returned no audio")
+    return b"".join(chunks)
+
+
+def generate_avatar_voice_cache(text: str, cache_key: str) -> None:
+    config = avatar_env_config()
+    if not (config["tts_worker_url"] or config["tts_command"]):
+        return
+    paths = avatar_voice_cache_paths(cache_key)
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    paths["text"].write_text(text, encoding="utf-8")
+    tts_paths = {
+        "image_path": Path(config["source_image_path"]) if config["source_image_path"] else AVATAR_ASSET_DIR / "portrait.jpg",
+        "text_path": paths["text"],
+        "audio_path": paths["audio"],
+        "output_path": paths["dir"] / "unused.mp4",
+        "job_dir": paths["dir"],
+    }
+    started = time.time()
+    result = run_tts_step(config, tts_paths, paths["dir"], step_name="voice_cache_tts")
+    meta = {
+        "key": cache_key,
+        "text": text,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "duration_seconds": round(time.time() - started, 2),
+        "result": result,
+    }
+    paths["meta"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def schedule_avatar_voice_cache(text: str) -> tuple[str, str]:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized:
+        return "", "empty"
+    cache_key = avatar_voice_cache_key(normalized)
+    paths = avatar_voice_cache_paths(cache_key)
+    if paths["audio"].exists():
+        return cache_key, "cached"
+    with avatar_voice_cache_lock:
+        if cache_key in avatar_voice_cache_pending:
+            return cache_key, "warming"
+        avatar_voice_cache_pending.add(cache_key)
+
+    def runner() -> None:
+        try:
+            generate_avatar_voice_cache(normalized, cache_key)
+        finally:
+            with avatar_voice_cache_lock:
+                avatar_voice_cache_pending.discard(cache_key)
+
+    avatar_voice_cache_executor.submit(runner)
+    return cache_key, "warming"
+
+
+def avatar_visual_driver_configured(config: dict[str, str]) -> bool:
+    return bool(
+        config.get("lipsync_worker_url")
+        and config.get("stream_worker_url")
+        and (config.get("base_video_path") or config.get("source_image_path"))
+        and avatar_realtime_voice_configured(config)
+    )
+
+
+def run_avatar_realtime_visual_driver(
+    visual_id: str,
+    chunks: list[dict[str, Any]],
+    config: dict[str, str],
+) -> None:
+    visual_dir = AVATAR_LAYER_DIR / "_realtime-visual" / visual_id
+    visual_dir.mkdir(parents=True, exist_ok=True)
+    source_video = Path(config.get("base_video_path") or "")
+    if not source_video.exists():
+        raise FileNotFoundError("realtime visual driver requires base_video_path")
+    try:
+        call_avatar_worker(
+            config["lipsync_worker_url"],
+            "/prepare-realtime-avatar",
+            {
+                "avatar_id": config.get("realtime_avatar_id") or "digital_twin",
+                "video_path": str(source_video),
+                "force": False,
+            },
+            timeout_seconds=120,
+        )
+    except Exception:
+        pass
+    for chunk in chunks:
+        text = str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        index = int(chunk.get("index") or 0)
+        stream_session_id = str(chunk.get("visual_session_id") or f"{visual_id}-{index:02d}")
+        audio_path = visual_dir / f"chunk_{index:02d}.mp3"
+        output_path = visual_dir / f"chunk_{index:02d}.mp4"
+        try:
+            cached_audio = wait_avatar_realtime_audio_cache(
+                text,
+                config.get("volcengine_encoding") or "mp3",
+                timeout_seconds=2.4,
+            )
+            if cached_audio:
+                shutil.copy2(cached_audio, audio_path)
+            else:
+                audio_path.write_bytes(synthesize_volcengine_audio_bytes(text, config))
+            call_avatar_worker(
+                config["lipsync_worker_url"],
+                "/realtime-lipsync",
+                {
+                    "avatar_id": config.get("realtime_avatar_id") or "digital_twin",
+                    "video_path": str(source_video),
+                    "audio_path": str(audio_path),
+                    "output_path": str(output_path),
+                    "fps": int(config.get("lipsync_fps") or 8),
+                    "batch_size": int(config.get("lipsync_batch_size") or 8),
+                    "skip_video": True,
+                    "stream_worker_url": config.get("stream_worker_url", ""),
+                    "stream_session_id": stream_session_id,
+                },
+                timeout_seconds=120,
+            )
+        except Exception as exc:
+            (visual_dir / f"chunk_{index:02d}.error.txt").write_text(str(exc), encoding="utf-8")
+
+
+def schedule_avatar_realtime_visual_driver(
+    chunks: list[dict[str, Any]],
+    config: dict[str, str],
+) -> dict[str, Any]:
+    if not chunks or not avatar_visual_driver_configured(config):
+        return {"enabled": False, "status": "not_configured"}
+    visual_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    for chunk in chunks:
+        try:
+            index = int(chunk.get("index") or 0)
+        except Exception:
+            index = 0
+        chunk["visual_session_id"] = f"{visual_id}-{index:02d}"
+    snapshot = dict(config)
+    avatar_visual_executor.submit(run_avatar_realtime_visual_driver, visual_id, list(chunks), snapshot)
+    return {
+        "enabled": True,
+        "status": "starting",
+        "provider": "musetalk_realtime",
+        "id": visual_id,
+        "stream_url": avatar_worker_url(config["stream_worker_url"], "/idle.mjpg"),
+        "stream_worker_url": config.get("stream_worker_url", ""),
+        "sync_mode": "per_audio_chunk",
+        "sessions": [
+            {
+                "index": chunk.get("index", 0),
+                "text": chunk.get("text", ""),
+                "session_id": chunk.get("visual_session_id", ""),
+            }
+            for chunk in chunks
+        ],
+        "transport": "mjpeg_active_frames",
+        "note": "MuseTalk worker pushes generated mouth frames into per-chunk sync sessions while cloned audio plays.",
+    }
 
 
 def generate_avatar_audio_chunks(
@@ -1444,6 +1978,102 @@ def create_avatar_reply(payload: dict[str, Any]) -> dict[str, Any]:
     job["status"] = "completed"
     write_avatar_job(job_dir, job)
     return job
+
+
+def create_avatar_realtime_reply(payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.time()
+    draft_text = str(payload.get("draft_text") or "").strip()
+    draft_result: dict[str, Any] | None = None
+    if not draft_text:
+        realtime_payload = dict(payload)
+        realtime_payload["latency_profile"] = "fast_avatar"
+        draft_result = generate_draft(realtime_payload)
+        draft_text = str(draft_result.get("draft_text") or "").strip()
+    if not draft_text:
+        raise ValueError("realtime draft generation produced no text")
+    config = avatar_env_config()
+    voice_cache_key, voice_cache_status = schedule_avatar_voice_cache(draft_text)
+    files: dict[str, str] = {}
+    streaming_voice_url = ""
+    streaming_voice_chunks: list[dict[str, Any]] = []
+    if avatar_realtime_voice_configured(config):
+        voice_chunks = avatar_voice_text_chunks(draft_text)
+        streaming_voice_url = avatar_streaming_voice_url(draft_text)
+        streaming_voice_chunks = [
+            {
+                "index": index,
+                "text": chunk,
+                "audio_url": avatar_streaming_voice_url(chunk, index),
+            }
+            for index, chunk in enumerate(voice_chunks)
+        ]
+        files["streaming_voice"] = streaming_voice_url
+    elif voice_cache_key and voice_cache_status == "cached":
+        files["realtime_voice"] = avatar_voice_cache_url(voice_cache_key)
+    if streaming_voice_url:
+        clone_voice_provider = config.get("realtime_voice_provider") or "elevenlabs"
+        clone_voice_status = "streaming"
+        clone_voice_fallback = ""
+        speech_mode = "streaming_clone_provider"
+        visual_driver = schedule_avatar_realtime_visual_driver(streaming_voice_chunks, config)
+    elif files.get("realtime_voice"):
+        clone_voice_provider = "indextts2_cache"
+        clone_voice_status = voice_cache_status
+        clone_voice_fallback = ""
+        speech_mode = "cached_clone_provider"
+        visual_driver = {"enabled": False, "status": "voice_cache_mode"}
+    else:
+        clone_voice_provider = "browser_speech"
+        clone_voice_status = voice_cache_status
+        clone_voice_fallback = "browser_speech"
+        speech_mode = "browser_realtime_provider"
+        visual_driver = {"enabled": False, "status": "browser_speech_mode"}
+    return {
+        "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": "live_runtime_lightweight",
+        "phase": "relationship_graph_to_realtime_avatar",
+        "interaction_core": "relationship_graph_draft",
+        "multimodal_surface": str(payload.get("multimodal_output_surface") or "avatar"),
+        "status": "completed",
+        "person_query": str(payload.get("query") or "").strip(),
+        "scenario": str(payload.get("scenario") or "").strip(),
+        "draft_text": draft_text,
+        "draft_result": draft_result,
+        "files": files,
+        "clone_voice": {
+            "provider": clone_voice_provider,
+            "status": clone_voice_status,
+            "cache_key": voice_cache_key,
+            "audio_url": streaming_voice_url or files.get("realtime_voice", ""),
+            "audio_chunks": streaming_voice_chunks,
+            "visual_driver": visual_driver,
+            "fallback": clone_voice_fallback,
+        },
+        "steps": [
+            {
+                "name": "draft",
+                "mode": (draft_result or {}).get("generation_engine") or "provided_text",
+                "returncode": 0,
+                "duration_seconds": round(time.time() - started, 2),
+            },
+            {
+                "name": "speech_and_mouth",
+                "mode": speech_mode,
+                "returncode": 0,
+                "duration_seconds": 0,
+            },
+        ],
+        "metrics": {
+            "started_at_epoch": started,
+            "target_seconds": 1.5,
+            "architecture": "realtime_runtime_lane",
+            "elapsed_seconds": round(time.time() - started, 2),
+            "realtime_viable": True,
+            "latency_note": "Realtime lane skips IndexTTS2 and MuseTalk; browser speech is a temporary low-latency provider.",
+        },
+        "message": "Realtime avatar reply generated. Speech and mouth motion run in the live runtime lane.",
+    }
 
 
 def start_avatar_reply_job(payload: dict[str, Any]) -> dict[str, Any]:
@@ -5222,6 +5852,23 @@ def normalize_chat_style(value: str, max_segments: int = 3, max_chars: int = 22)
     return [fallback]
 
 
+def compact_fast_avatar_segments(segments: list[str], max_chars: int = 12) -> list[str]:
+    if not segments:
+        return []
+    first = re.sub(r"\s+", " ", segments[0]).strip()
+    if not first or first in LOW_VALUE_REPLIES or is_no_reply_output(first):
+        return []
+    if len(first) <= max_chars:
+        return [first]
+    for mark in "。！？!?，,、；; ":
+        index = first.find(mark)
+        if 2 <= index <= max_chars:
+            candidate = first[:index].strip(" ，,、；;。！？!?")
+            if candidate and candidate not in LOW_VALUE_REPLIES:
+                return [candidate]
+    return [first[:max_chars].strip(" ，,、；;。！？!?")]
+
+
 PERSONALITY_FACT_REWRITES = [
     (
         re.compile(r"(我来下单还是做都行|我来做也行|我做也行|我来下厨|我下厨|我来做饭|我可以做饭|我会做饭|我给你做|我做给你|我来烧|我烧给你)"),
@@ -5864,6 +6511,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/avatar/status":
             self.send_json({"ok": True, "result": avatar_layer_status()})
             return
+        if path == "/api/avatar/portrait":
+            config = avatar_env_config()
+            portrait_path = Path(config["source_image_path"]) if config["source_image_path"] else Path()
+            self.serve_file(portrait_path)
+            return
+        if path.startswith("/api/avatar/voice-cache/"):
+            try:
+                cache_name = path.rsplit("/", 1)[-1]
+                cache_key = cache_name.removesuffix(".wav")
+                self.serve_file(avatar_voice_cache_file(cache_key))
+            except Exception:
+                self.send_error(404)
+            return
+        if path == "/api/avatar/streaming-voice":
+            text = str((query.get("text") or [""])[0]).strip()
+            self.serve_avatar_streaming_voice(text)
+            return
         if path == "/api/avatar/jobs":
             limit = int((query.get("limit") or ["20"])[0])
             self.send_json({"ok": True, "result": {"jobs": recent_avatar_jobs(limit)}})
@@ -5907,6 +6571,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
+            "/api/avatar/realtime-reply",
             "/api/avatar/reply",
         }:
             self.send_error(404)
@@ -5939,6 +6604,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = merge_selfcore_candidates(payload)
             elif self.path == "/api/selfcore-candidates/inject":
                 result = inject_selfcore_proposals(payload)
+            elif self.path == "/api/avatar/realtime-reply":
+                result = create_avatar_realtime_reply(payload)
             elif self.path == "/api/avatar/reply":
                 result = (
                     start_avatar_reply_job(payload)
@@ -5964,6 +6631,218 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def serve_avatar_streaming_voice(self, text: str) -> None:
+        if not text:
+            self.send_error(400, "text is required")
+            return
+        config = avatar_env_config()
+        if not avatar_realtime_voice_configured(config):
+            self.send_error(404, "streaming voice provider is not configured")
+            return
+        if config["realtime_voice_provider"] == "elevenlabs":
+            self.serve_elevenlabs_streaming_voice(text, config)
+            return
+        if config["realtime_voice_provider"] == "volcengine":
+            self.serve_volcengine_voice(text, config)
+            return
+        self.send_error(400, "unsupported streaming voice provider")
+
+    def serve_elevenlabs_streaming_voice(self, text: str, config: dict[str, str]) -> None:
+        endpoint = (
+            "https://api.elevenlabs.io/v1/text-to-speech/"
+            + quote(config["elevenlabs_voice_id"])
+            + "/stream"
+        )
+        payload = {
+            "text": text,
+            "model_id": config["elevenlabs_model_id"] or "eleven_flash_v2_5",
+            "voice_settings": {
+                "stability": 0.48,
+                "similarity_boost": 0.82,
+                "use_speaker_boost": False,
+            },
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "xi-api-key": config["elevenlabs_api_key"],
+            },
+            method="POST",
+        )
+        try:
+            upstream = request.urlopen(req, timeout=30)
+        except Exception as exc:
+            self.send_error(502, f"streaming voice provider failed: {exc}")
+            return
+        with upstream:
+            content_type = upstream.headers.get("Content-Type") or "audio/mpeg"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                chunk = upstream.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
+    def serve_volcengine_voice(self, text: str, config: dict[str, str]) -> None:
+        if config.get("volcengine_api_key"):
+            self.serve_volcengine_ark_voice(text, config)
+            return
+        if (config.get("volcengine_stream_transport") or "websocket").lower() == "websocket":
+            try:
+                self.serve_volcengine_websocket_voice(text, config)
+                return
+            except Exception:
+                pass
+        self.serve_volcengine_openspeech_voice(text, config)
+
+    def serve_volcengine_websocket_voice(self, text: str, config: dict[str, str]) -> None:
+        endpoint = config.get("volcengine_ws_endpoint") or "wss://openspeech.bytedance.com/api/v1/tts/ws_binary"
+        request_payload = volcengine_ws_request_payload(text, config)
+        wrote_audio = False
+        audio_parts: list[bytes] = []
+        with MinimalWebSocketClient(endpoint, headers={"Authorization": f"Bearer;{config['volcengine_token']}"}, timeout=30) as ws:
+            ws.send_binary(request_payload)
+            while True:
+                opcode, frame = ws.recv()
+                if opcode != 0x2:
+                    continue
+                parsed = parse_volcengine_ws_response(frame)
+                if parsed["type"] == "error":
+                    raise ValueError(str(parsed.get("text") or "volcengine websocket error"))
+                payload = parsed.get("payload") or b""
+                if parsed["type"] == "audio" and payload:
+                    audio_parts.append(payload)
+                    if not wrote_audio:
+                        self.send_response(200)
+                        self.send_header("Content-Type", f"audio/{config.get('volcengine_encoding') or 'mp3'}")
+                        self.send_header("X-Voice-Transport", "volcengine-websocket")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                    wrote_audio = True
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+                if parsed.get("done"):
+                    break
+        if not wrote_audio:
+            raise ValueError("volcengine websocket returned no audio")
+        write_avatar_realtime_audio_cache(text, b"".join(audio_parts), config.get("volcengine_encoding") or "mp3")
+
+    def serve_volcengine_ark_voice(self, text: str, config: dict[str, str]) -> None:
+        endpoint = config.get("volcengine_endpoint") or "https://ark.cn-beijing.volces.com/api/v3/audio/speech"
+        payload = {
+            "model": config.get("volcengine_model") or "doubao-tts",
+            "input": text,
+            "voice": config["volcengine_voice_type"],
+            "response_format": config.get("volcengine_encoding") or "mp3",
+            "speed": 1.0,
+        }
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {config['volcengine_api_key']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            upstream = request.urlopen(req, timeout=30)
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            self.send_error(502, f"volcengine ark voice provider failed: HTTP {exc.code}: {raw[:500]}")
+            return
+        except Exception as exc:
+            self.send_error(502, f"volcengine ark voice provider failed: {exc}")
+            return
+        with upstream:
+            content_type = upstream.headers.get("Content-Type") or "audio/mpeg"
+            if "json" in content_type.lower():
+                raw = upstream.read().decode("utf-8", errors="replace")
+                self.serve_audio_from_json_payload(raw, default_content_type="audio/mpeg")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                chunk = upstream.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
+    def serve_volcengine_openspeech_voice(self, text: str, config: dict[str, str]) -> None:
+        endpoint = config.get("volcengine_endpoint") or "https://openspeech.bytedance.com/api/v1/tts"
+        encoding = config.get("volcengine_encoding") or "mp3"
+        payload = {
+            "app": {
+                "appid": config["volcengine_app_id"],
+                "token": config["volcengine_token"],
+                "cluster": config["volcengine_cluster"],
+            },
+            "user": {"uid": "digital_twin_avatar"},
+            "audio": {
+                "voice_type": config["volcengine_voice_type"],
+                "encoding": encoding,
+                "speed_ratio": 1.0,
+            },
+            "request": {
+                "reqid": f"dtwin-tts-{uuid4().hex}",
+                "text": text,
+                "operation": "query",
+            },
+        }
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer;{config['volcengine_token']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            self.send_error(502, f"volcengine openspeech voice provider failed: HTTP {exc.code}: {raw[:500]}")
+            return
+        except Exception as exc:
+            self.send_error(502, f"volcengine openspeech voice provider failed: {exc}")
+            return
+        self.serve_audio_from_json_payload(raw, default_content_type=f"audio/{encoding}")
+
+    def serve_audio_from_json_payload(self, raw: str, default_content_type: str = "audio/mpeg") -> None:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self.send_error(502, f"voice provider returned non-audio response: {raw[:500]}")
+            return
+        audio_value = first_nested_value(payload, {"data", "audio", "audio_data", "content", "b64_json"})
+        if not audio_value:
+            self.send_error(502, f"voice provider returned no audio data: {raw[:500]}")
+            return
+        try:
+            audio_bytes = base64.b64decode(str(audio_value), validate=False)
+        except Exception as exc:
+            self.send_error(502, f"voice provider returned invalid audio data: {exc}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", default_content_type)
+        self.send_header("Content-Length", str(len(audio_bytes)))
+        self.send_header("X-Voice-Transport", "provider-json-audio")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(audio_bytes)
 
     def send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

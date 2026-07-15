@@ -158,9 +158,9 @@
   margin-top: 12px;
 }
 
-.avatar-stage-card audio {
-  width: 100%;
-  margin-bottom: 12px;
+.avatar-stage-card audio,
+.avatar-stage-card video[hidden] {
+  display: none;
 }
 
 .avatar-reply {

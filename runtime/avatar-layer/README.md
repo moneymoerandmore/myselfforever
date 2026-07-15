@@ -91,11 +91,72 @@ The avatar page treats audio as the master clock. It plays the WAV only after a 
 For real-time avatar trials, the dashboard now uses a `fast_avatar` generation profile:
 
 - The relationship-graph draft prompt is constrained to one very short message.
-- MuseTalk runs at a lower default FPS (`lipsync_fps`, default `12`).
-- MuseTalk uses a larger worker batch size (`lipsync_batch_size`, default `8`).
-- The worker can skip final MP4 muxing (`lipsync_skip_video`, default `true`) and publish synchronized frames directly to the live canvas.
+- MuseTalk runs in realtime at `lipsync_fps` 16 by default.
+- MuseTalk uses a small realtime batch size (`lipsync_batch_size` 4 by default) so the first frames arrive earlier.
+- The worker skips final MP4 muxing (`lipsync_skip_video`, default `true`) and publishes synchronized frames directly to per-audio-chunk sessions.
 
 This reduces perceived latency by shrinking text, audio duration, generated frame count, and post-processing. It does not remove the remaining first-audio bottleneck from IndexTTS2; if the experience is still too slow, the next optimization should target TTS first-token/first-chunk latency or a faster voice path.
+
+## Stage F: Realtime Runtime Lane
+
+The MuseTalk + IndexTTS2 chain is no longer treated as the default interaction path. Local tests showed that even a 3-character utterance can take more than 12 seconds because IndexTTS2 first-audio generation and MuseTalk audio-feature extraction are both blocking.
+
+The avatar layer is now split into two lanes:
+
+- Realtime lane: relationship-graph reply text -> browser/local low-latency speech provider -> lightweight live mouth motion. This is the default for `avatar.html`.
+- Fidelity lane: IndexTTS2 + MuseTalk/LivePortrait high-fidelity generation. This remains useful for offline render, replay, and later provider comparison, but it must not block conversation.
+
+Current realtime endpoint:
+
+```text
+POST /api/avatar/realtime-reply
+GET  /api/avatar/portrait
+GET  /api/avatar/streaming-voice?text=...
+```
+
+`/api/avatar/realtime-reply` keeps the same SelfCore, identity facts, RelationshipGraph, DyadicProfile, and CommunicationPolicy path as ordinary draft generation. Only the expression provider changes. The temporary browser speech provider does not claim to be the final cloned voice; it is a latency-first placeholder until a true streaming voice provider is selected.
+
+For cloned realtime speech, local private credentials live in `runtime/avatar-layer/config.local.json` and are ignored by git. The current provider contract is:
+
+```json
+{
+  "realtime_voice_provider": "elevenlabs",
+  "elevenlabs_api_key": "...",
+  "elevenlabs_voice_id": "...",
+  "elevenlabs_model_id": "eleven_flash_v2_5"
+}
+```
+
+Volcengine is also supported as the realtime voice provider. Use the Ark API-key path when the credential is an `apikey-*` value:
+
+```json
+{
+  "realtime_voice_provider": "volcengine",
+  "volcengine_api_key": "...",
+  "volcengine_voice_type": "...",
+  "volcengine_model": "...",
+  "volcengine_encoding": "mp3"
+}
+```
+
+For the classic openspeech TTS path, use AppID/Token/Cluster instead:
+
+```json
+{
+  "realtime_voice_provider": "volcengine",
+  "volcengine_app_id": "...",
+  "volcengine_token": "...",
+  "volcengine_cluster": "...",
+  "volcengine_voice_type": "...",
+  "volcengine_stream_transport": "websocket",
+  "volcengine_ws_endpoint": "wss://openspeech.bytedance.com/api/v1/tts/ws_binary",
+  "volcengine_encoding": "mp3"
+}
+```
+
+When `volcengine_stream_transport` is `websocket`, the dashboard connects to Volcengine's binary WebSocket TTS endpoint and proxies the audio frames back through `/api/avatar/streaming-voice`. Successful responses include `X-Voice-Transport: volcengine-websocket`. If the WebSocket path fails before audio starts, the server falls back to the proven JSON/base64 HTTP TTS path.
+
+When the selected provider has both credentials and a voice identifier configured, `avatar.html` plays the cloned voice from `/api/avatar/streaming-voice`. Realtime replies also return `clone_voice.audio_chunks`; each chunk has its own `visual_session_id`, and the page requests `/sync-frame?session_id=...&t=...` from the stream worker using the currently playing audio time. This keeps cloned speech and MuseTalk frames on the same browser clock while preloading the next speech chunk. If the voice identifier is missing, the page falls back to browser speech rather than pretending a generic voice is the user's clone.
 
 ## 环境变量契约
 
