@@ -1,5 +1,12 @@
 # Avatar Layer v0.1
 
+Deprecated: this 2D avatar layer is no longer the active product route. The
+dashboard `/avatar.html` now uses `runtime/avatar-runtime-3d` and
+`services/avatar-3d-bridge` for a persistent 3D runtime. Keep this directory only
+as historical reference or fallback experiments; do not build new mainline avatar
+work on LivePortrait, MuseTalk, generated clips, MJPEG idle streams, or canvas
+mouth overlays.
+
 第五层对外交互层的本地数字人形象适配。
 
 当前目标分两阶段：

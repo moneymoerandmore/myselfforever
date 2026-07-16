@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>数字人形象 · 关系图谱多模态输出</title>
+    <title>数字人 3D Runtime · 关系图谱多模态输出</title>
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/avatar.css" />
   </head>
@@ -11,8 +11,8 @@
     <main class="shell avatar-shell">
       <header class="topbar">
         <div>
-          <h1>数字人形象</h1>
-          <p>第五层 · 对外交互层 · 关系图谱表达的多模态输出</p>
+          <h1>数字人 3D Runtime</h1>
+          <p>第五层 · 对外交互层 · 关系图谱表达的常驻 3D 形象输出</p>
           <nav class="top-links" aria-label="Dashboard 页面">
             <a href="/">关系 / 群监控</a>
             <a href="/avatar.html">数字人形象</a>
@@ -41,7 +41,7 @@
           <div class="avatar-section-head">
             <div>
               <h2>关系图谱输入</h2>
-              <p>先选关系节点，再由同一套关系图谱交流内核生成回复；本页只负责把回复变成声音和形象。</p>
+              <p>数字人只负责多模态表达，交流内核仍然来自关系图谱和本我事实边界。</p>
             </div>
           </div>
 
@@ -69,7 +69,7 @@
                 <option value="work_discussion">工作讨论</option>
                 <option value="news_discussion">新闻讨论</option>
                 <option value="decision_request">决策判断</option>
-                <option value="emotional_support">安慰支持</option>
+                <option value="emotional_support">情绪支持</option>
                 <option value="investment_discussion">投资讨论</option>
                 <option value="logistics">事务确认</option>
               </select>
@@ -86,55 +86,59 @@
 
           <label>
             <span>对方刚说的话</span>
-            <textarea id="scenario" rows="7" placeholder="输入对方发来的最后一条消息。后续麦克风/摄像头输入也会先转成这个关系图谱上下文。"></textarea>
+            <textarea id="scenario" rows="6" placeholder="输入对方发来的最后一条消息。后续麦克风/摄像头输入也会先进入这层上下文。"></textarea>
           </label>
 
           <label>
             <span>已有上下文，可选</span>
-            <textarea id="contextText" rows="5" placeholder="一行一条，例如：&#10;对方：这个方案靠谱么&#10;我：先看目标和代价"></textarea>
+            <textarea id="contextText" rows="5" placeholder="一行一条，例如：&#10;对方：这个方案靠谱吗&#10;我：先看目标和代价"></textarea>
           </label>
 
           <div class="actions avatar-actions">
             <button type="button" class="ghost" id="refreshButton">刷新状态</button>
-            <button type="button" id="renderButton">生成数字人回复</button>
+            <button type="button" id="speakButton">让 3D 数字我回复</button>
           </div>
         </aside>
 
         <section class="avatar-main">
+          <section class="avatar-card avatar-runtime-card">
+            <div class="avatar-section-head">
+              <div>
+                <h2>3D 常驻流</h2>
+                <p id="runtimeSummary">正在读取 3D runtime 配置。</p>
+              </div>
+              <span class="mode-badge" id="providerBadge">--</span>
+            </div>
+            <div class="avatar-stage">
+              <iframe id="runtimeFrame" title="3D 数字人常驻流" hidden></iframe>
+              <div id="runtimePlaceholder" class="avatar-stage-placeholder">
+                <strong>等待 3D Runtime 接入</strong>
+                <span>这里将承载 Unreal / MetaHuman / Audio2Face 的 WebRTC 或 Pixel Streaming 画面。</span>
+              </div>
+            </div>
+            <audio id="avatarAudio" preload="auto" hidden></audio>
+          </section>
+
           <section class="avatar-card">
             <div class="avatar-section-head">
               <div>
-                <h2>本地形象层状态</h2>
-                <p id="providerSummary">正在读取配置。</p>
+                <h2>运行时状态</h2>
+                <p>这里只看 3D bridge、常驻流和克隆语音，不再检查 LivePortrait / MuseTalk。</p>
               </div>
-              <span class="mode-badge" id="providerBadge">--</span>
+              <span class="risk risk-idle" id="runtimeBadge">--</span>
             </div>
             <div class="avatar-status-grid" id="providerGrid"></div>
           </section>
 
-          <section class="avatar-card avatar-stage-card">
-            <div class="avatar-section-head">
-              <div>
-                <h2>数字人输出</h2>
-                <p id="jobSummary">还没有生成任务。</p>
-              </div>
-              <span class="risk risk-idle" id="jobBadge">--</span>
-            </div>
-            <img id="avatarLiveStream" class="avatar-live-stream" alt="数字人永续 idle live stream" hidden />
-            <canvas id="avatarSyncCanvas" class="avatar-sync-canvas" hidden></canvas>
-            <audio id="avatarAudio" preload="auto" hidden></audio>
-            <video id="avatarVideo" class="avatar-video" playsinline hidden></video>
-            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本、关系依据和渲染状态会出现在这里。</pre>
-          </section>
-
           <section class="avatar-card">
             <div class="avatar-section-head">
               <div>
-                <h2>最近任务</h2>
-                <p>记录本地生成任务，方便排查 TTS / MuseTalk 链路。</p>
+                <h2>本次输出</h2>
+                <p id="jobSummary">还没有发起 3D 回复。</p>
               </div>
+              <span class="risk risk-idle" id="jobBadge">--</span>
             </div>
-            <div class="avatar-jobs" id="jobsList"></div>
+            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本、关系依据和 3D runtime 指令会显示在这里。</pre>
           </section>
         </section>
       </section>

@@ -89,6 +89,49 @@
   line-height: 1.45;
 }
 
+.avatar-runtime-card {
+  min-height: 520px;
+}
+
+.avatar-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.avatar-stage iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #0f172a;
+}
+
+.avatar-stage-placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: #e5e7eb;
+}
+
+.avatar-stage-placeholder strong {
+  font-size: 18px;
+}
+
+.avatar-stage-placeholder span {
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .avatar-status-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -126,80 +169,8 @@
   background: #fff8ec;
 }
 
-.avatar-stage-card {
-  min-height: 460px;
-}
-
-.avatar-live-stream {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #111;
-  object-fit: contain;
-}
-
-.avatar-sync-canvas {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #111;
-}
-
-.avatar-video {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #111;
-  margin-top: 12px;
-}
-
-.avatar-stage-card audio,
-.avatar-stage-card video[hidden] {
-  display: none;
-}
-
 .avatar-reply {
   min-height: 190px;
-  margin-top: 14px;
-}
-
-.avatar-jobs {
-  display: grid;
-  gap: 10px;
-}
-
-.avatar-job {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 12px;
-}
-
-.avatar-job strong {
-  display: block;
-  font-size: 13px;
-  margin-bottom: 4px;
-}
-
-.avatar-job p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.avatar-job a {
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 700;
-  text-decoration: none;
 }
 
 @media (max-width: 980px) {

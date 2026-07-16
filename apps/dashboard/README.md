@@ -37,7 +37,7 @@ http://127.0.0.1:8788/multimodal.html
 http://127.0.0.1:8788/avatar.html
 ```
 
-该页属于第五层对外交互层。当前第一阶段支持“选择联系人 + 输入对方内容 -> 生成我的回复 -> 交给本地 LivePortrait/TTS 适配器”；本地适配契约见 `runtime/avatar-layer/README.md`。
+该页属于第五层对外交互层。当前主路径已经切到 3D 常驻 Runtime：选择联系人和输入上下文仍然走关系图谱交流内核，输出侧交给 `runtime/avatar-runtime-3d` 与 `services/avatar-3d-bridge`。旧 LivePortrait/MuseTalk/2D 生成视频链路只保留为历史兼容，不再是主页面方案。
 
 ## API
 
@@ -109,9 +109,19 @@ POST /api/multimodal/intake
 数字人形象层：
 
 ```text
+GET  /api/avatar3d/status
+GET  /api/avatar3d/streaming-voice
+POST /api/avatar3d/realtime-reply
+```
+
+`/api/avatar3d/realtime-reply` 会复用 `/api/draft` 的关系图谱回复生成结果，再把文本、流式克隆语音 URL 和元数据下发给 3D bridge。3D bridge 负责把音频驱动到真实 3D 角色运行时；未连接时必须明确返回未连接，不伪造 2D 画面。
+
+旧兼容接口仍存在：
+
+```text
 GET  /api/avatar/status
 GET  /api/avatar/jobs
 POST /api/avatar/reply
 ```
 
-`/api/avatar/reply` 会复用 `/api/draft` 的回复生成结果，再按本地环境变量调用 TTS 和 LivePortrait 命令。未配置本地命令时，接口仍会创建任务并返回缺失项，不会伪造视频输出。
+这些接口只用于历史排查，不应用于新的数字人主路径。

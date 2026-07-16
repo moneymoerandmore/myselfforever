@@ -67,6 +67,10 @@ AVATAR_CONFIG_PATH = AVATAR_ASSET_DIR / "config.json"
 AVATAR_LOCAL_CONFIG_PATH = AVATAR_ASSET_DIR / "config.local.json"
 AVATAR_VOICE_CACHE_DIR = AVATAR_LAYER_DIR / "_voice-cache"
 AVATAR_REALTIME_AUDIO_CACHE_DIR = AVATAR_LAYER_DIR / "_realtime-audio-cache"
+AVATAR3D_LAYER_DIR = ROOT / "data" / "generated" / "avatar-runtime-3d"
+AVATAR3D_ASSET_DIR = ROOT / "runtime" / "avatar-runtime-3d"
+AVATAR3D_CONFIG_PATH = AVATAR3D_ASSET_DIR / "config.json"
+AVATAR3D_LOCAL_CONFIG_PATH = AVATAR3D_ASSET_DIR / "config.local.json"
 MAX_MULTIMODAL_FILES = 36
 MAX_IMAGE_DATA_URL_CHARS = 900_000
 MAX_TOTAL_DATA_URL_CHARS = 8_000_000
@@ -930,6 +934,209 @@ def avatar_layer_status() -> dict[str, Any]:
     }
 
 
+def avatar3d_env_config() -> dict[str, str]:
+    file_config: dict[str, str] = {}
+    config_keys = {
+        "runtime_provider",
+        "bridge_url",
+        "stream_url",
+        "voice_provider",
+        "render_transport",
+        "character_id",
+        "audio_input_mode",
+        "unreal_ws_url",
+    }
+    for config_path in (AVATAR3D_CONFIG_PATH, AVATAR3D_LOCAL_CONFIG_PATH):
+        if not config_path.exists():
+            continue
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            if isinstance(payload, dict):
+                for key in config_keys:
+                    value = str(payload.get(key) or "").strip()
+                    if value:
+                        file_config[key] = value
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {
+        "runtime_provider": os.environ.get("AVATAR3D_PROVIDER", "").strip()
+        or file_config.get("runtime_provider", "nvidia_audio2face_unreal"),
+        "bridge_url": os.environ.get("AVATAR3D_BRIDGE_URL", "").strip()
+        or file_config.get("bridge_url", "http://127.0.0.1:8820"),
+        "stream_url": os.environ.get("AVATAR3D_STREAM_URL", "").strip()
+        or file_config.get("stream_url", ""),
+        "voice_provider": os.environ.get("AVATAR_REALTIME_VOICE_PROVIDER", "").strip()
+        or file_config.get("voice_provider", "volcengine"),
+        "render_transport": os.environ.get("AVATAR3D_RENDER_TRANSPORT", "").strip()
+        or file_config.get("render_transport", "webrtc_or_pixel_streaming"),
+        "character_id": os.environ.get("AVATAR3D_CHARACTER_ID", "").strip()
+        or file_config.get("character_id", "digital_twin_3d"),
+        "audio_input_mode": os.environ.get("AVATAR3D_AUDIO_INPUT_MODE", "").strip()
+        or file_config.get("audio_input_mode", "streaming_tts_to_runtime"),
+        "unreal_ws_url": os.environ.get("UNREAL_WS_URL", "").strip()
+        or os.environ.get("AVATAR3D_UNREAL_WS_URL", "").strip()
+        or file_config.get("unreal_ws_url", ""),
+    }
+
+
+def avatar3d_runtime_status() -> dict[str, Any]:
+    config = avatar3d_env_config()
+    voice_config = avatar_env_config()
+    bridge = probe_avatar_worker(config["bridge_url"])
+    return {
+        "layer": "external_interaction.avatar_3d",
+        "provider": config["runtime_provider"],
+        "phase": "relationship_graph_to_persistent_3d_runtime",
+        "output_dir": str(AVATAR3D_LAYER_DIR),
+        "asset_dir": str(AVATAR3D_ASSET_DIR),
+        "config_path": str(AVATAR3D_CONFIG_PATH),
+        "deprecated_2d_avatar_layer": True,
+        "runtime": {
+            "bridge_url": config["bridge_url"],
+            "bridge": bridge,
+            "stream_url": config["stream_url"],
+            "stream_configured": bool(config["stream_url"]),
+            "render_transport": config["render_transport"],
+            "character_id": config["character_id"],
+            "audio_input_mode": config["audio_input_mode"],
+            "unreal_ws_url": config["unreal_ws_url"],
+            "unreal_ws_configured": bool(config["unreal_ws_url"]),
+            "env": "AVATAR3D_BRIDGE_URL / AVATAR3D_STREAM_URL / UNREAL_WS_URL / AVATAR3D_PROVIDER",
+        },
+        "realtime_voice": {
+            "provider": voice_config["realtime_voice_provider"],
+            "configured": avatar_realtime_voice_configured(voice_config),
+            "voice_id_configured": bool(voice_config["elevenlabs_voice_id"])
+            if voice_config["realtime_voice_provider"] == "elevenlabs"
+            else bool(voice_config["volcengine_voice_type"]),
+            "api_key_configured": bool(voice_config["elevenlabs_api_key"])
+            if voice_config["realtime_voice_provider"] == "elevenlabs"
+            else bool(voice_config["volcengine_api_key"] or voice_config["volcengine_token"]),
+            "stream_endpoint": "/api/avatar3d/streaming-voice",
+        },
+        "contract": {
+            "runtime_health": "GET /health on the 3D bridge",
+            "runtime_say": "POST /api/say with text, audio_url, voice_provider, metadata",
+            "unreal_event": "Bridge forwards state/say events to UNREAL_WS_URL as websocket JSON",
+            "unreal_pull": "Unreal can long-poll GET /api/unreal/events on the 3D bridge",
+            "state": "idle/listening/thinking/speaking/error",
+        },
+    }
+
+
+def call_avatar3d_bridge(
+    config: dict[str, str],
+    endpoint: str,
+    payload: dict[str, Any],
+    timeout_seconds: float = 1.5,
+) -> dict[str, Any]:
+    if not config.get("bridge_url"):
+        return {"ok": False, "configured": False, "error": "bridge_url is not configured"}
+    try:
+        result = call_avatar_worker(config["bridge_url"], endpoint, payload, timeout_seconds=timeout_seconds)
+        return {"ok": True, "configured": True, **result}
+    except Exception as exc:
+        return {"ok": False, "configured": True, "error": str(exc)}
+
+
+def create_avatar3d_realtime_reply(payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.time()
+    draft_text = str(payload.get("draft_text") or "").strip()
+    draft_result: dict[str, Any] | None = None
+    if not draft_text:
+        realtime_payload = dict(payload)
+        realtime_payload["latency_profile"] = "fast_avatar"
+        draft_result = generate_draft(realtime_payload)
+        draft_text = str(draft_result.get("draft_text") or "").strip()
+    if not draft_text:
+        raise ValueError("3D realtime draft generation produced no text")
+
+    config3d = avatar3d_env_config()
+    voice_config = avatar_env_config()
+    audio_chunks: list[dict[str, Any]] = []
+    audio_url = ""
+    files: dict[str, str] = {}
+    if avatar_realtime_voice_configured(voice_config):
+        chunks = avatar_voice_text_chunks(draft_text)
+        audio_url = avatar3d_streaming_voice_url(draft_text)
+        audio_chunks = [
+            {
+                "index": index,
+                "text": chunk,
+                "audio_url": avatar3d_streaming_voice_url(chunk, index),
+            }
+            for index, chunk in enumerate(chunks)
+        ]
+        files["streaming_voice"] = audio_url
+
+    runtime_payload = {
+        "text": draft_text,
+        "audio_url": audio_url,
+        "audio_chunks": audio_chunks,
+        "audio_format": voice_config.get("volcengine_encoding") or "mp3",
+        "voice_provider": voice_config.get("realtime_voice_provider") or config3d["voice_provider"],
+        "character_id": config3d["character_id"],
+        "unreal_ws_url": config3d["unreal_ws_url"],
+        "metadata": {
+            "query": str(payload.get("query") or "").strip(),
+            "scenario": str(payload.get("scenario") or "").strip(),
+            "interaction_core": "relationship_graph_draft",
+            "surface": "avatar_3d",
+        },
+    }
+    runtime_command = call_avatar3d_bridge(config3d, "/api/say", runtime_payload, timeout_seconds=1.5)
+    return {
+        "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": config3d["runtime_provider"],
+        "phase": "relationship_graph_to_persistent_3d_runtime",
+        "interaction_core": "relationship_graph_draft",
+        "multimodal_surface": "avatar_3d",
+        "status": "completed",
+        "person_query": str(payload.get("query") or "").strip(),
+        "scenario": str(payload.get("scenario") or "").strip(),
+        "draft_text": draft_text,
+        "draft_result": draft_result,
+        "files": files,
+        "runtime": {
+            "bridge_url": config3d["bridge_url"],
+            "stream_url": config3d["stream_url"],
+            "character_id": config3d["character_id"],
+            "unreal_ws_url": config3d["unreal_ws_url"],
+            "command": runtime_command,
+        },
+        "clone_voice": {
+            "provider": voice_config.get("realtime_voice_provider") or config3d["voice_provider"],
+            "status": "streaming" if audio_url else "not_configured",
+            "audio_url": audio_url,
+            "audio_chunks": audio_chunks,
+        },
+        "steps": [
+            {
+                "name": "draft",
+                "mode": (draft_result or {}).get("generation_engine") or "provided_text",
+                "returncode": 0,
+                "duration_seconds": round(time.time() - started, 2),
+            },
+            {
+                "name": "3d_runtime_command",
+                "mode": config3d["runtime_provider"],
+                "returncode": 0 if runtime_command.get("ok") else 1,
+                "duration_seconds": runtime_command.get("duration_seconds", 0),
+                "error": runtime_command.get("error", ""),
+            },
+        ],
+        "metrics": {
+            "started_at_epoch": started,
+            "target_seconds": 1.0,
+            "architecture": "persistent_3d_runtime",
+            "elapsed_seconds": round(time.time() - started, 2),
+            "realtime_viable": bool(config3d["stream_url"] and runtime_command.get("ok")),
+        },
+        "message": "3D runtime reply prepared. The persistent character runtime owns face and mouth motion.",
+    }
+
+
 def recent_avatar_jobs(limit: int = 20) -> list[dict[str, Any]]:
     if not AVATAR_LAYER_DIR.exists():
         return []
@@ -1309,6 +1516,13 @@ def avatar_voice_text_chunks(text: str, max_chars: int = 6) -> list[str]:
 
 def avatar_streaming_voice_url(text: str, chunk_index: int | None = None) -> str:
     url = f"/api/avatar/streaming-voice?text={quote(text)}"
+    if chunk_index is not None:
+        url += f"&chunk={chunk_index}"
+    return url
+
+
+def avatar3d_streaming_voice_url(text: str, chunk_index: int | None = None) -> str:
+    url = f"/api/avatar3d/streaming-voice?text={quote(text)}"
     if chunk_index is not None:
         url += f"&chunk={chunk_index}"
     return url
@@ -6511,6 +6725,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/avatar/status":
             self.send_json({"ok": True, "result": avatar_layer_status()})
             return
+        if path == "/api/avatar3d/status":
+            self.send_json({"ok": True, "result": avatar3d_runtime_status()})
+            return
         if path == "/api/avatar/portrait":
             config = avatar_env_config()
             portrait_path = Path(config["source_image_path"]) if config["source_image_path"] else Path()
@@ -6525,6 +6742,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
             return
         if path == "/api/avatar/streaming-voice":
+            text = str((query.get("text") or [""])[0]).strip()
+            self.serve_avatar_streaming_voice(text)
+            return
+        if path == "/api/avatar3d/streaming-voice":
             text = str((query.get("text") or [""])[0]).strip()
             self.serve_avatar_streaming_voice(text)
             return
@@ -6571,6 +6792,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/speaker-profiles/enroll",
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
+            "/api/avatar3d/realtime-reply",
             "/api/avatar/realtime-reply",
             "/api/avatar/reply",
         }:
@@ -6604,6 +6826,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = merge_selfcore_candidates(payload)
             elif self.path == "/api/selfcore-candidates/inject":
                 result = inject_selfcore_proposals(payload)
+            elif self.path == "/api/avatar3d/realtime-reply":
+                result = create_avatar3d_realtime_reply(payload)
             elif self.path == "/api/avatar/realtime-reply":
                 result = create_avatar_realtime_reply(payload)
             elif self.path == "/api/avatar/reply":
