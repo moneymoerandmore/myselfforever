@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web 3D Digital Twin Runtime</title>
+    <link rel="stylesheet" href="/avatar-runtime-3d.css" />
+  </head>
+  <body>
+    <main class="runtime-shell">
+      <section class="runtime-stage" id="stage">
+        <div class="runtime-fallback" id="fallback" hidden>
+          <div class="fallback-person">
+            <span class="fallback-head"></span>
+            <span class="fallback-body"></span>
+          </div>
+          <p>Web 3D runtime fallback</p>
+        </div>
+        <div class="runtime-overlay">
+          <span id="stateBadge">idle</span>
+          <span id="connectionBadge">connecting</span>
+        </div>
+        <div class="runtime-subtitle" id="subtitle">等待数字我输入</div>
+      </section>
+      <audio id="voiceAudio" preload="auto" crossorigin="anonymous"></audio>
+    </main>
+    <script type="module" src="/avatar-runtime-3d.js"></script>
+  </body>
+</html>

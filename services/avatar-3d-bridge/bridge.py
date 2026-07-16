@@ -24,7 +24,7 @@ from uuid import uuid4
 STATE: dict[str, Any] = {
     "state": "idle",
     "runtime_connected": False,
-    "provider": "nvidia_audio2face_unreal",
+    "provider": "web_threejs_runtime",
     "character_id": "digital_twin_3d",
     "last_command": None,
     "last_unreal_event": None,

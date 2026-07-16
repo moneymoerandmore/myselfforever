@@ -29,6 +29,7 @@ const POE_MODEL_STORAGE_KEY = "digitalTwin.poeModel";
 
 let people = [];
 let runtimeStatus = null;
+let visualSyncTimer = 0;
 
 function setHealth(ok, text) {
   healthStatus.textContent = text;
@@ -41,8 +42,8 @@ function setBadge(element, status) {
   element.className = "risk";
   if (!status) element.classList.add("risk-idle");
   else if (status === "ready" || status === "completed") element.classList.add("risk-r0");
-  else if (status === "partial" || status === "configured") element.classList.add("risk-r1");
-  else if (status === "missing" || status === "bridge_down") element.classList.add("risk-r2");
+  else if (status === "partial" || status === "configured" || status === "starting") element.classList.add("risk-r1");
+  else if (status === "missing" || status === "failed") element.classList.add("risk-r2");
   else element.classList.add("risk-r3");
 }
 
@@ -56,7 +57,7 @@ function restoreSettings() {
     poeApiKeyInput.value = localStorage.getItem(POE_API_KEY_STORAGE_KEY) || "";
     poeModelInput.value = localStorage.getItem(POE_MODEL_STORAGE_KEY) || poeModelInput.value;
   } catch {
-    // Keep the current page usable if storage is blocked.
+    // Keep visible form values as the source of truth for this session.
   }
 }
 
@@ -68,7 +69,7 @@ function cacheSettings() {
     else localStorage.removeItem(POE_API_KEY_STORAGE_KEY);
     if (model) localStorage.setItem(POE_MODEL_STORAGE_KEY, model);
   } catch {
-    // Visible form values are enough for this session.
+    // Storage may be blocked; the form still works.
   }
 }
 
@@ -144,7 +145,7 @@ function renderRelationProfile() {
         `中位字数 ${dyadic.median_chars}`,
         `话题 ${(dyadic.top_topics || []).join("、") || "不足"}`,
       ].join("；")
-    : "暂无可用双人定向画像，生成时必须保守，不用关系大类模板脑补。";
+    : "暂无可用双人定向画像，生成时必须保守，不能用关系大类模板脑补。";
 
   if (person.group === "direct" && permission.can_generate_draft !== false) {
     modeInput.disabled = false;
@@ -188,59 +189,42 @@ function providerItem(title, ready, detail) {
   return item;
 }
 
-function bridgeText(bridge) {
-  if (!bridge?.configured) return "bridge not configured";
-  if (bridge.ok) return "bridge ok";
-  return `bridge down: ${bridge.error || "unknown"}`;
+function workerText(worker) {
+  if (!worker?.configured) return "not configured";
+  if (worker.ok) return "ok";
+  return `down: ${worker.error || "unknown"}`;
 }
 
 function renderRuntimeStatus(status) {
   runtimeStatus = status;
-  const runtime = status.runtime || {};
+  const stream = status.stream || {};
   const voice = status.realtime_voice || {};
-  const bridge = runtime.bridge || {};
-  const bridgeResult = bridge.result || {};
-  const bridgeOk = Boolean(bridge.ok);
-  const streamReady = Boolean(runtime.stream_url);
-  const unrealReady = Boolean(runtime.unreal_ws_url || bridgeResult.unreal?.configured || bridgeResult.unreal?.pull_connected);
+  const lipsync = status.lipsync || {};
+  const tts = status.tts || {};
+  const streamWorker = stream.worker || {};
+  const lipsyncWorker = lipsync.worker || {};
+  const ttsWorker = tts.worker || {};
+  const streamReady = Boolean(stream.configured && streamWorker.ok && stream.idle_stream_url);
+  const lipsyncReady = Boolean(lipsync.configured && lipsyncWorker.ok);
   const voiceReady = Boolean(voice.configured);
-  const ready = bridgeOk && streamReady && unrealReady && voiceReady;
+  const ttsReady = Boolean(tts.configured && (ttsWorker.ok || voice.provider === "indextts2"));
+  const ready = streamReady && lipsyncReady && voiceReady && ttsReady;
 
-  providerBadge.textContent = status.provider || "--";
+  providerBadge.textContent = "musetalk";
   runtimeSummary.textContent = ready
-    ? "3D 常驻流、bridge 和克隆语音都已配置。"
-    : "3D 路线已启用，但 runtime/流/语音仍有未接入项。";
-  setBadge(runtimeBadge, ready ? "ready" : bridgeOk || streamReady || voiceReady ? "partial" : "missing");
+    ? "MuseTalk、常驻 MJPEG 流和本地克隆语音都已接入。"
+    : "MuseTalk 本地链路仍有未接入项。";
+  setBadge(runtimeBadge, ready ? "ready" : streamReady || lipsyncReady || voiceReady ? "partial" : "missing");
 
   providerGrid.innerHTML = "";
-  providerGrid.appendChild(providerItem("3D Bridge", bridgeOk, `${runtime.bridge_url || "--"} · ${bridgeText(bridge)}`));
-  providerGrid.appendChild(
-    providerItem(
-      "Unreal WS",
-      unrealReady,
-      runtime.unreal_ws_url || bridgeResult.unreal?.ws_url || "UNREAL_WS_URL 未配置，可用 HTTP Pull"
-    )
-  );
-  providerGrid.appendChild(
-    providerItem(
-      "Unreal Pull",
-      Boolean(bridgeResult.unreal?.pull_connected),
-      `${runtime.bridge_url || "--"}${bridgeResult.unreal?.pull_url || "/api/unreal/events"} · queued ${bridgeResult.unreal?.queued_events || 0}`
-    )
-  );
-  providerGrid.appendChild(
-    providerItem("常驻视频流", streamReady, runtime.stream_url || "AVATAR3D_STREAM_URL 未配置")
-  );
-  providerGrid.appendChild(
-    providerItem("克隆语音", voiceReady, `${voice.provider || "--"} · ${voice.stream_endpoint || "--"}`)
-  );
-  providerGrid.appendChild(providerItem("视觉路线", true, `${status.provider} · ${runtime.render_transport || "--"}`));
-  providerGrid.appendChild(
-    providerItem("废弃 2D", Boolean(status.deprecated_2d_avatar_layer), "LivePortrait / MuseTalk 不再是主页面路径")
-  );
+  providerGrid.appendChild(providerItem("MuseTalk worker", lipsyncReady, `${lipsync.worker_url || "--"} / ${workerText(lipsyncWorker)}`));
+  providerGrid.appendChild(providerItem("MJPEG stream", streamReady, stream.idle_stream_url || "stream worker not configured"));
+  providerGrid.appendChild(providerItem("IndexTTS2 voice", voiceReady, `${voice.provider || "--"} / /api/avatar/streaming-voice`));
+  providerGrid.appendChild(providerItem("TTS worker", ttsReady, `${tts.worker_url || "--"} / ${workerText(ttsWorker)}`));
+  providerGrid.appendChild(providerItem("视觉路线", true, `${lipsync.provider || "musetalk"} / ${lipsync.mode || "realtime"}`));
 
   if (streamReady) {
-    runtimeFrame.src = runtime.stream_url;
+    runtimeFrame.src = `${stream.idle_stream_url}${stream.idle_stream_url.includes("?") ? "&" : "?"}t=${Date.now()}`;
     runtimeFrame.hidden = false;
     runtimePlaceholder.hidden = true;
   } else {
@@ -250,10 +234,24 @@ function renderRuntimeStatus(status) {
   }
 }
 
+function idleStreamUrl() {
+  const url = runtimeStatus?.stream?.idle_stream_url || "";
+  if (!url) return "";
+  return `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+}
+
+function showIdleStream() {
+  const url = idleStreamUrl();
+  if (!url) return;
+  runtimeFrame.src = url;
+  runtimeFrame.hidden = false;
+  runtimePlaceholder.hidden = true;
+}
+
 async function loadRuntimeStatus() {
-  const response = await fetch("/api/avatar3d/status");
+  const response = await fetch("/api/avatar/status");
   const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "avatar3d status failed");
+  if (!data.ok) throw new Error(data.error || "avatar status failed");
   renderRuntimeStatus(data.result);
 }
 
@@ -261,35 +259,66 @@ function requestPayload() {
   const person = selectedPerson();
   return {
     poe_api_key: poeApiKeyInput.value.trim(),
-    model: poeModelInput.value.trim(),
+    poe_model: poeModelInput.value.trim(),
     query: person?.query || person?.display_name || "",
     person_id: person?.id || "",
     intent: intentInput.value,
     mode: modeInput.value,
     scenario: scenarioInput.value.trim(),
     conversation_history: conversationHistory(),
-    multimodal_output_surface: "avatar_3d",
+    multimodal_output_surface: "avatar_musetalk",
   };
 }
 
 function renderReply(result) {
-  const bridge = result.runtime?.command || {};
-  const workerResult = bridge.worker_result || {};
-  const unrealEvent = workerResult.unreal_event || workerResult.last_unreal_event || {};
   const chunks = result.clone_voice?.audio_chunks || [];
+  const visual = result.clone_voice?.visual_driver || {};
   const lines = [
     result.draft_text || "",
     "",
-    `3D provider: ${result.provider || "--"}`,
-    `Bridge: ${bridge.ok ? "ok" : bridge.error || "not connected"}`,
-    `Unreal WS: ${unrealEvent.ok ? "sent" : unrealEvent.error || result.runtime?.unreal_ws_url || "not configured"}`,
-    `Stream: ${result.runtime?.stream_url || "not configured"}`,
+    `Visual: ${visual.provider || result.provider || "--"} / ${visual.status || "--"}`,
+    `Stream: ${visual.stream_url || runtimeStatus?.stream?.idle_stream_url || "--"}`,
     `Voice: ${result.clone_voice?.provider || "--"} / ${result.clone_voice?.status || "--"}`,
     `Audio chunks: ${chunks.length}`,
   ];
   replyText.textContent = lines.join("\n");
-  jobSummary.textContent = result.message || "3D runtime 指令已生成。";
+  jobSummary.textContent = result.message || "MuseTalk runtime 指令已生成。";
   setBadge(jobBadge, result.status || "completed");
+}
+
+function stopVisualSync() {
+  if (visualSyncTimer) {
+    window.clearInterval(visualSyncTimer);
+    visualSyncTimer = 0;
+  }
+}
+
+function startVisualSync(result) {
+  stopVisualSync();
+  const visual = result.clone_voice?.visual_driver || {};
+  const sessionId = visual.sessions?.[0]?.session_id || "";
+  const streamWorkerUrl = visual.stream_worker_url || "";
+  if (!sessionId || !streamWorkerUrl) {
+    showIdleStream();
+    return;
+  }
+  const baseUrl = `${streamWorkerUrl.replace(/\/$/, "")}/sync-frame`;
+  const updateFrame = () => {
+    if (!avatarAudio.paused && !avatarAudio.ended) {
+      const t = Math.max(0, Math.floor((avatarAudio.currentTime || 0) * 1000));
+      runtimeFrame.src = `${baseUrl}?session_id=${encodeURIComponent(sessionId)}&t=${t}&_=${Date.now()}`;
+    }
+  };
+  updateFrame();
+  visualSyncTimer = window.setInterval(updateFrame, 80);
+  avatarAudio.addEventListener(
+    "ended",
+    () => {
+      stopVisualSync();
+      showIdleStream();
+    },
+    { once: true }
+  );
 }
 
 async function playFirstAudioChunk(result) {
@@ -299,24 +328,25 @@ async function playFirstAudioChunk(result) {
   avatarAudio.src = firstUrl;
   try {
     await avatarAudio.play();
+    startVisualSync(result);
   } catch {
-    // Browser autoplay policies may require a second user gesture.
+    jobSummary.textContent = "浏览器阻止了自动播放，再点一次回复或点页面后重试。";
   }
 }
 
-async function speakWith3dRuntime() {
+async function speakWithMuseRuntime() {
   cacheSettings();
   speakButton.disabled = true;
-  jobSummary.textContent = "生成关系图谱回复，并下发 3D runtime...";
+  jobSummary.textContent = "生成关系图谱回复，并下发 MuseTalk runtime...";
   setBadge(jobBadge, "partial");
   try {
-    const response = await fetch("/api/avatar3d/realtime-reply", {
+    const response = await fetch("/api/avatar/realtime-reply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestPayload()),
     });
     const data = await response.json();
-    if (!data.ok) throw new Error(data.error || "3D reply failed");
+    if (!data.ok) throw new Error(data.error || "MuseTalk reply failed");
     renderReply(data.result);
     await playFirstAudioChunk(data.result);
     await loadRuntimeStatus();
@@ -341,7 +371,7 @@ async function init() {
 
 personSelect.addEventListener("change", renderRelationProfile);
 refreshButton.addEventListener("click", loadRuntimeStatus);
-speakButton.addEventListener("click", speakWith3dRuntime);
+speakButton.addEventListener("click", speakWithMuseRuntime);
 clearPoeApiKeyButton.addEventListener("click", clearPoeKey);
 poeApiKeyInput.addEventListener("change", cacheSettings);
 poeModelInput.addEventListener("change", cacheSettings);

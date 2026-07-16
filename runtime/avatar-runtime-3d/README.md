@@ -25,7 +25,7 @@ Important fields:
 - `bridge_url`: local bridge service, default `http://127.0.0.1:8820`.
 - `stream_url`: browser-visible 3D stream URL. Leave empty until Unreal/Pixel Streaming/WebRTC is running.
 - `unreal_ws_url`: Unreal-side websocket command endpoint, for example `ws://127.0.0.1:8830/avatar`.
-- `runtime_provider`: current target stack, default `nvidia_audio2face_unreal`.
+- `runtime_provider`: current target stack, default `web_threejs_runtime`.
 - `character_id`: stable id for the 3D digital twin character.
 
 ## Pixel Streaming Short Path
@@ -69,6 +69,36 @@ YourUnrealApp.exe -PixelStreamingURL=ws://127.0.0.1:8888 -RenderOffScreen
 
 For editor play-in-editor testing, enable the Pixel Streaming plugin and use the
 same streamer URL in the plugin/runtime settings or launch arguments.
+
+## Web 3D Fallback Runtime
+
+If Unreal is not installed, use the built-in Web 3D runtime:
+
+```text
+http://127.0.0.1:8788/avatar-runtime-3d.html
+```
+
+Set local config:
+
+```json
+{
+  "bridge_url": "http://127.0.0.1:8820",
+  "stream_url": "http://127.0.0.1:8788/avatar-runtime-3d.html",
+  "render_transport": "web_threejs_runtime"
+}
+```
+
+This runtime:
+
+- renders a persistent browser 3D avatar with Three.js when available;
+- falls back to a CSS 3D placeholder instead of showing a blank screen;
+- long-polls bridge events through the dashboard;
+- plays `audio_url` from `say` events;
+- drives mouth movement from audio energy.
+
+This is a temporary local route to validate real-time interaction shape. Replace
+the stylized generated avatar with a VRM model later, or switch `stream_url` back
+to Pixel Streaming when Unreal/MetaHuman is ready.
 
 ## Current Contract
 

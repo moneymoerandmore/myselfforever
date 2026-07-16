@@ -1,10 +1,10 @@
 {
-  "runtime_provider": "nvidia_audio2face_unreal",
+  "runtime_provider": "web_threejs_runtime",
   "bridge_url": "http://127.0.0.1:8820",
   "stream_url": "",
   "unreal_ws_url": "",
-  "voice_provider": "volcengine",
-  "render_transport": "webrtc_or_pixel_streaming",
+  "voice_provider": "indextts2",
+  "render_transport": "web_threejs_runtime",
   "character_id": "digital_twin_3d",
   "audio_input_mode": "streaming_tts_to_runtime",
   "deprecated_2d_avatar_layer": true

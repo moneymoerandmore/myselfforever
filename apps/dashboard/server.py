@@ -676,15 +676,10 @@ def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
         if trusted_group:
             apply_trusted_group_risk(result)
     else:
-        result["draft_text"] = (
-            "Poe 模型生成失败，没有生成正文。\n"
-            f"原因：{model_error}\n\n"
-            "下面是本次准备送入模型的提示词：\n\n"
-            + prompt
-        )
-        result["tone_basis"] = "poe_model_failed_no_fallback"
-        if model_error not in result["questions_for_user"]:
-            result["questions_for_user"].insert(0, model_error)
+        apply_local_draft_fallback(result, conversation_history, model_error)
+        if trusted_group:
+            apply_trusted_group_risk(result)
+        return result
     return result
 
 
@@ -879,13 +874,13 @@ def avatar_layer_status() -> dict[str, Any]:
             "configured": avatar_realtime_voice_configured(config),
             "model_id": config["elevenlabs_model_id"]
             if config["realtime_voice_provider"] == "elevenlabs"
-            else config["volcengine_model"],
+            else ("IndexTTS2" if config["realtime_voice_provider"] == "indextts2" else config["volcengine_model"]),
             "voice_id_configured": bool(config["elevenlabs_voice_id"])
             if config["realtime_voice_provider"] == "elevenlabs"
-            else bool(config["volcengine_voice_type"]),
+            else (bool(config["tts_worker_url"] or config["tts_command"]) if config["realtime_voice_provider"] == "indextts2" else bool(config["volcengine_voice_type"])),
             "api_key_configured": bool(config["elevenlabs_api_key"])
             if config["realtime_voice_provider"] == "elevenlabs"
-            else bool(config["volcengine_api_key"] or config["volcengine_token"]),
+            else (True if config["realtime_voice_provider"] == "indextts2" else bool(config["volcengine_api_key"] or config["volcengine_token"])),
             "credential_mode": "ark_api_key"
             if config["volcengine_api_key"]
             else ("openspeech_token" if config["volcengine_token"] else ""),
@@ -1008,10 +1003,10 @@ def avatar3d_runtime_status() -> dict[str, Any]:
             "configured": avatar_realtime_voice_configured(voice_config),
             "voice_id_configured": bool(voice_config["elevenlabs_voice_id"])
             if voice_config["realtime_voice_provider"] == "elevenlabs"
-            else bool(voice_config["volcengine_voice_type"]),
+            else (bool(voice_config["tts_worker_url"] or voice_config["tts_command"]) if voice_config["realtime_voice_provider"] == "indextts2" else bool(voice_config["volcengine_voice_type"])),
             "api_key_configured": bool(voice_config["elevenlabs_api_key"])
             if voice_config["realtime_voice_provider"] == "elevenlabs"
-            else bool(voice_config["volcengine_api_key"] or voice_config["volcengine_token"]),
+            else (True if voice_config["realtime_voice_provider"] == "indextts2" else bool(voice_config["volcengine_api_key"] or voice_config["volcengine_token"])),
             "stream_endpoint": "/api/avatar3d/streaming-voice",
         },
         "contract": {
@@ -1073,7 +1068,7 @@ def create_avatar3d_realtime_reply(payload: dict[str, Any]) -> dict[str, Any]:
         "text": draft_text,
         "audio_url": audio_url,
         "audio_chunks": audio_chunks,
-        "audio_format": voice_config.get("volcengine_encoding") or "mp3",
+        "audio_format": "wav" if voice_config.get("realtime_voice_provider") == "indextts2" else voice_config.get("volcengine_encoding") or "mp3",
         "voice_provider": voice_config.get("realtime_voice_provider") or config3d["voice_provider"],
         "character_id": config3d["character_id"],
         "unreal_ws_url": config3d["unreal_ws_url"],
@@ -1249,6 +1244,8 @@ def avatar_worker_url(base_url: str, path: str) -> str:
 
 def avatar_realtime_voice_configured(config: dict[str, str]) -> bool:
     provider = config.get("realtime_voice_provider")
+    if provider == "indextts2":
+        return bool(config.get("tts_worker_url") or config.get("tts_command"))
     if provider == "volcengine":
         return bool(
             (
@@ -1834,18 +1831,26 @@ def run_avatar_realtime_visual_driver(
             continue
         index = int(chunk.get("index") or 0)
         stream_session_id = str(chunk.get("visual_session_id") or f"{visual_id}-{index:02d}")
-        audio_path = visual_dir / f"chunk_{index:02d}.mp3"
+        local_voice = config.get("realtime_voice_provider") == "indextts2"
+        audio_path = visual_dir / f"chunk_{index:02d}.{'wav' if local_voice else 'mp3'}"
         output_path = visual_dir / f"chunk_{index:02d}.mp4"
         try:
-            cached_audio = wait_avatar_realtime_audio_cache(
-                text,
-                config.get("volcengine_encoding") or "mp3",
-                timeout_seconds=2.4,
-            )
-            if cached_audio:
-                shutil.copy2(cached_audio, audio_path)
+            if local_voice:
+                cache_key = avatar_voice_cache_key(text)
+                voice_paths = avatar_voice_cache_paths(cache_key)
+                if not voice_paths["audio"].exists() or voice_paths["audio"].stat().st_size <= 0:
+                    generate_avatar_voice_cache(text, cache_key)
+                shutil.copy2(voice_paths["audio"], audio_path)
             else:
-                audio_path.write_bytes(synthesize_volcengine_audio_bytes(text, config))
+                cached_audio = wait_avatar_realtime_audio_cache(
+                    text,
+                    config.get("volcengine_encoding") or "mp3",
+                    timeout_seconds=2.4,
+                )
+                if cached_audio:
+                    shutil.copy2(cached_audio, audio_path)
+                else:
+                    audio_path.write_bytes(synthesize_volcengine_audio_bytes(text, config))
             call_avatar_worker(
                 config["lipsync_worker_url"],
                 "/realtime-lipsync",
@@ -6113,6 +6118,83 @@ def enforce_personality_fact_boundaries(segments: list[str]) -> tuple[list[str],
     return rewritten, notes
 
 
+def local_draft_fallback_segments(
+    draft_context: dict[str, Any],
+    conversation_history: list[dict[str, str]],
+) -> list[str]:
+    """Minimal continuity fallback when the upstream model is unavailable."""
+    anchor = str(draft_context.get("scenario") or "").strip()
+    for item in reversed(conversation_history):
+        if item.get("role") == "contact" and str(item.get("content") or "").strip():
+            anchor = str(item["content"]).strip()
+            break
+    lowered = anchor.lower()
+    high_risk_terms = (
+        "买入",
+        "卖出",
+        "加仓",
+        "减仓",
+        "仓位",
+        "止损",
+        "目标价",
+        "收益率",
+        "借钱",
+        "转账",
+        "密码",
+        "验证码",
+        "保证",
+        "承诺",
+        "诊断",
+        "处方",
+        "用药",
+        "合同",
+        "起诉",
+    )
+    if any(term in anchor for term in high_risk_terms):
+        return ["这个别自动回"]
+    if any(term in anchor for term in ("做饭", "下厨", "烧菜", "做菜")):
+        return ["我不会做饭", "点外卖吧"]
+    if any(term in anchor for term in ("吃啥", "吃什么", "晚饭", "午饭", "外卖", "下单")):
+        return ["你定方向", "我来下单"]
+    if "poe" in lowered or "500" in lowered or "api" in lowered:
+        return ["Poe 又挂了", "先走兜底"]
+    if any(term in anchor for term in ("太慢", "慢", "实时", "延迟", "卡")):
+        return ["先压延迟"]
+    if any(mark in anchor for mark in ("?", "？", "吗", "怎么", "咋", "什么")):
+        return ["先看事实"]
+    if len(anchor) <= 18 and anchor:
+        return [f"先接这个：{anchor}"[:22]]
+    return ["先别拍死", "看最后那句就行"]
+
+
+def apply_local_draft_fallback(
+    result: dict[str, Any],
+    conversation_history: list[dict[str, str]],
+    model_error: str,
+) -> None:
+    segments = local_draft_fallback_segments(result, conversation_history)
+    if str(result.get("latency_profile") or "").strip() == "fast_avatar":
+        segments = compact_fast_avatar_segments(segments, max_chars=12)
+    segments, personality_guard_notes = enforce_personality_fact_boundaries(segments)
+    result["generation_engine"] = "poe_model_failed_local_fallback"
+    result["model_error"] = model_error
+    result["draft_segments"] = segments
+    result["draft_text"] = "\n".join(segments)
+    result["no_reply"] = len(segments) == 0
+    result["tone_basis"] = "poe_model_failed_local_fallback"
+    result["factuality_status"] = "fallback_not_model_audited"
+    result["factuality_reason"] = model_error
+    result["personality_guard"] = {
+        "status": "rewritten" if personality_guard_notes else "passed",
+        "notes": personality_guard_notes,
+    }
+    if model_error and model_error not in result["questions_for_user"]:
+        result["questions_for_user"].insert(0, model_error)
+    note = "Poe 上游失败，已使用本地保守兜底短回复；只能保证不断流，不代表完整人格生成质量。"
+    if note not in result["questions_for_user"]:
+        result["questions_for_user"].insert(1 if model_error else 0, note)
+
+
 def normalize_conversation_history(value: Any) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -6696,6 +6778,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/avatar.css":
             self.serve_file(DASHBOARD_DIR / "avatar.css")
             return
+        if path == "/avatar-runtime-3d.html":
+            self.serve_file(DASHBOARD_DIR / "avatar-runtime-3d.html")
+            return
+        if path == "/avatar-runtime-3d.js":
+            self.serve_file(DASHBOARD_DIR / "avatar-runtime-3d.js")
+            return
+        if path == "/avatar-runtime-3d.css":
+            self.serve_file(DASHBOARD_DIR / "avatar-runtime-3d.css")
+            return
         if path == "/app.js":
             self.serve_file(DASHBOARD_DIR / "app.js")
             return
@@ -6727,6 +6818,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/avatar3d/status":
             self.send_json({"ok": True, "result": avatar3d_runtime_status()})
+            return
+        if path == "/api/avatar3d/runtime-events":
+            after = str((query.get("after") or [""])[0]).strip()
+            timeout = str((query.get("timeout") or ["0"])[0]).strip() or "0"
+            self.proxy_avatar3d_bridge_get(f"/api/unreal/events?after={quote(after)}&timeout={quote(timeout)}")
             return
         if path == "/api/avatar/portrait":
             config = avatar_env_config()
@@ -6793,6 +6889,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/selfcore-candidates/merge",
             "/api/selfcore-candidates/inject",
             "/api/avatar3d/realtime-reply",
+            "/api/avatar3d/runtime-ack",
             "/api/avatar/realtime-reply",
             "/api/avatar/reply",
         }:
@@ -6828,6 +6925,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = inject_selfcore_proposals(payload)
             elif self.path == "/api/avatar3d/realtime-reply":
                 result = create_avatar3d_realtime_reply(payload)
+            elif self.path == "/api/avatar3d/runtime-ack":
+                result = self.proxy_avatar3d_bridge_post("/api/unreal/ack", payload)
             elif self.path == "/api/avatar/realtime-reply":
                 result = create_avatar_realtime_reply(payload)
             elif self.path == "/api/avatar/reply":
@@ -6842,6 +6941,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
         self.send_json({"ok": True, "result": result})
+
+    def proxy_avatar3d_bridge_get(self, endpoint: str) -> None:
+        config = avatar3d_env_config()
+        bridge_url = config.get("bridge_url", "")
+        if not bridge_url:
+            self.send_json({"ok": False, "error": "avatar3d bridge_url is not configured"}, status=404)
+            return
+        try:
+            req = request.Request(avatar_worker_url(bridge_url, endpoint), method="GET")
+            with request.urlopen(req, timeout=15.5) as response:
+                body = response.read()
+                status = response.status
+                content_type = response.headers.get("Content-Type") or "application/json; charset=utf-8"
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=502)
+            return
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def proxy_avatar3d_bridge_post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        config = avatar3d_env_config()
+        bridge_url = config.get("bridge_url", "")
+        if not bridge_url:
+            raise ValueError("avatar3d bridge_url is not configured")
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = request.Request(
+            avatar_worker_url(bridge_url, endpoint),
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not data.get("ok"):
+            raise ValueError(str(data.get("error") or "avatar3d bridge request failed"))
+        return data.get("result") if isinstance(data.get("result"), dict) else {}
 
     def serve_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
@@ -6870,7 +7009,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if config["realtime_voice_provider"] == "volcengine":
             self.serve_volcengine_voice(text, config)
             return
+        if config["realtime_voice_provider"] == "indextts2":
+            self.serve_indextts2_voice(text)
+            return
         self.send_error(400, "unsupported streaming voice provider")
+
+    def serve_indextts2_voice(self, text: str) -> None:
+        cache_key, cache_status = schedule_avatar_voice_cache(text)
+        if not cache_key:
+            self.send_error(400, "text is required")
+            return
+        paths = avatar_voice_cache_paths(cache_key)
+        if cache_status != "cached":
+            try:
+                generate_avatar_voice_cache(text, cache_key)
+            except Exception as exc:
+                self.send_error(502, f"indextts2 local voice provider failed: {exc}")
+                return
+        audio_path = paths["audio"]
+        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+            self.send_error(502, "indextts2 local voice provider returned no audio")
+            return
+        body = audio_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Voice-Transport", "indextts2-local")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_elevenlabs_streaming_voice(self, text: str, config: dict[str, str]) -> None:
         endpoint = (

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>数字人 3D Runtime · 关系图谱多模态输出</title>
+    <title>数字人 MuseTalk Runtime / 关系图谱多模态输出</title>
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/avatar.css" />
   </head>
@@ -11,8 +11,8 @@
     <main class="shell avatar-shell">
       <header class="topbar">
         <div>
-          <h1>数字人 3D Runtime</h1>
-          <p>第五层 · 对外交互层 · 关系图谱表达的常驻 3D 形象输出</p>
+          <h1>数字人 MuseTalk Runtime</h1>
+          <p>第五层 / 对外交互层 / 关系图谱表达的本地 MuseTalk 形象输出</p>
           <nav class="top-links" aria-label="Dashboard 页面">
             <a href="/">关系 / 群监控</a>
             <a href="/avatar.html">数字人形象</a>
@@ -96,7 +96,7 @@
 
           <div class="actions avatar-actions">
             <button type="button" class="ghost" id="refreshButton">刷新状态</button>
-            <button type="button" id="speakButton">让 3D 数字我回复</button>
+            <button type="button" id="speakButton">让 Muse 数字我回复</button>
           </div>
         </aside>
 
@@ -104,16 +104,16 @@
           <section class="avatar-card avatar-runtime-card">
             <div class="avatar-section-head">
               <div>
-                <h2>3D 常驻流</h2>
-                <p id="runtimeSummary">正在读取 3D runtime 配置。</p>
+                <h2>MuseTalk 常驻流</h2>
+                <p id="runtimeSummary">正在读取本地 MuseTalk runtime 配置。</p>
               </div>
               <span class="mode-badge" id="providerBadge">--</span>
             </div>
             <div class="avatar-stage">
-              <iframe id="runtimeFrame" title="3D 数字人常驻流" hidden></iframe>
+              <img id="runtimeFrame" class="avatar-stream" alt="MuseTalk 数字人常驻流" hidden />
               <div id="runtimePlaceholder" class="avatar-stage-placeholder">
-                <strong>等待 3D Runtime 接入</strong>
-                <span>这里将承载 Unreal / MetaHuman / Audio2Face 的 WebRTC 或 Pixel Streaming 画面。</span>
+                <strong>等待 MuseTalk Runtime 接入</strong>
+                <span>这里承载本地 MuseTalk / IndexTTS2 的 MJPEG 常驻流。</span>
               </div>
             </div>
             <audio id="avatarAudio" preload="auto" hidden></audio>
@@ -123,7 +123,7 @@
             <div class="avatar-section-head">
               <div>
                 <h2>运行时状态</h2>
-                <p>这里只看 3D bridge、常驻流和克隆语音，不再检查 LivePortrait / MuseTalk。</p>
+                <p>检查 MuseTalk worker、MJPEG stream worker 和本地 IndexTTS2 语音。</p>
               </div>
               <span class="risk risk-idle" id="runtimeBadge">--</span>
             </div>
@@ -134,11 +134,11 @@
             <div class="avatar-section-head">
               <div>
                 <h2>本次输出</h2>
-                <p id="jobSummary">还没有发起 3D 回复。</p>
+                <p id="jobSummary">还没有发起 MuseTalk 回复。</p>
               </div>
               <span class="risk risk-idle" id="jobBadge">--</span>
             </div>
-            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本、关系依据和 3D runtime 指令会显示在这里。</pre>
+            <pre class="draft status-draft avatar-reply" id="replyText">生成的回复文本、关系依据和 MuseTalk runtime 指令会显示在这里。</pre>
           </section>
         </section>
       </section>

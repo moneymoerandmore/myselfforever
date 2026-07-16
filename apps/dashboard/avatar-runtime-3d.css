@@ -1,0 +1,120 @@
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+
+.runtime-shell,
+.runtime-stage {
+  width: 100%;
+  height: 100%;
+}
+
+.runtime-stage {
+  position: relative;
+  background:
+    radial-gradient(circle at 50% 25%, rgba(59, 130, 246, 0.22), transparent 34%),
+    linear-gradient(180deg, #111827 0%, #020617 100%);
+}
+
+.runtime-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.runtime-overlay {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  gap: 8px;
+  z-index: 3;
+}
+
+.runtime-overlay span,
+.runtime-subtitle {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(12px);
+}
+
+.runtime-overlay span {
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.runtime-subtitle {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  width: min(720px, calc(100% - 32px));
+  min-height: 22px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #f8fafc;
+  font-size: 15px;
+  line-height: 1.45;
+  text-align: center;
+  z-index: 3;
+}
+
+.runtime-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.fallback-person {
+  position: relative;
+  width: 180px;
+  height: 260px;
+  margin: auto;
+  transform-style: preserve-3d;
+  animation: fallback-idle 3.2s ease-in-out infinite;
+}
+
+.fallback-head,
+.fallback-body {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(145deg, #cbd5e1, #64748b);
+  box-shadow: inset -22px -18px 28px rgba(15, 23, 42, 0.34), 0 24px 60px rgba(0, 0, 0, 0.4);
+}
+
+.fallback-head {
+  top: 0;
+  width: 112px;
+  height: 132px;
+  border-radius: 50% 50% 46% 46%;
+}
+
+.fallback-body {
+  bottom: 0;
+  width: 170px;
+  height: 150px;
+  border-radius: 44px 44px 18px 18px;
+}
+
+@keyframes fallback-idle {
+  0%,
+  100% {
+    transform: translateY(0) rotateY(-4deg);
+  }
+  50% {
+    transform: translateY(-8px) rotateY(4deg);
+  }
+}
